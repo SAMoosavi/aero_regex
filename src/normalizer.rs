@@ -1,27 +1,39 @@
 use itertools::Itertools;
-use regex_syntax::hir::{Class, Hir, HirKind};
+use regex_syntax::hir::{self, Class, Hir, HirKind};
 
 pub(crate) fn normalize(regex: &Hir) -> Hir {
     match regex.kind() {
-        HirKind::Empty => regex.clone(),
-        HirKind::Literal(_) => regex.clone(),
-        HirKind::Class(_) => regex.clone(),
-        HirKind::Look(_) => regex.clone(),
-        HirKind::Repetition(rep) => match (rep.min, rep.max) {
-            (min, Some(max)) if min == max => {
-                let sub = (*rep.sub).clone();
-                let concat = Hir::concat((0..min).map(|_| sub.clone()).collect());
-                normalize(&concat)
+        HirKind::Repetition(rep) => {
+            let sub = (*rep.sub).clone();
+
+            match (rep.min, rep.max) {
+                (min, Some(max)) if min == max => normalize_repeat(&sub, min),
+                (min, Some(max)) => {
+                    let mut current = normalize_repeat(&sub, min);
+
+                    let mut alternations = Vec::with_capacity((max - min + 1) as usize);
+                    alternations.push(current.clone());
+
+                    for _ in min..max {
+                        current = normalize(&Hir::concat(vec![current, sub.clone()]));
+                        alternations.push(current.clone());
+                    }
+
+                    normalize(&Hir::alternation(alternations))
+                }
+                (0, None) => regex.clone(),
+                (min, None) => {
+                    let star = Hir::repetition(hir::Repetition {
+                        min: 0,
+                        max: None,
+                        greedy: true,
+                        sub: rep.sub.clone(),
+                    });
+
+                    normalize(&Hir::concat(vec![normalize_repeat(&sub, min), star]))
+                }
             }
-            (min, Some(max)) => {
-                let sub = (*rep.sub).clone();
-                let alternations = (min..=max)
-                    .map(|i| Hir::concat((0..i).map(|_| sub.clone()).collect()))
-                    .collect();
-                normalize(&Hir::alternation(alternations))
-            }
-            (_, None) => regex.clone(),
-        },
+        }
         HirKind::Capture(capture) => normalize(&capture.sub),
         HirKind::Alternation(hirs) => Hir::alternation(hirs.iter().map(normalize).collect()),
         HirKind::Concat(hirs) => {
@@ -42,14 +54,7 @@ pub(crate) fn normalize(regex: &Hir) -> Hir {
                                 .cartesian_product(rhs.iter())
                                 .map(|(x, y)| concat(x, y))
                                 .collect();
-                            let a = Hir::alternation(merged);
-                            *acc.last_mut().unwrap() = if let HirKind::Concat(x) = a.kind() {
-                                normalize_concat(x)
-                            } else {
-                                a
-                            };
-                            // *acc.last_mut().unwrap() = Hir::alternation(merged);
-                            // *acc.last_mut().unwrap() = normalize_concat(merged);
+                            *acc.last_mut().unwrap() = Hir::alternation(merged);
                         }
                         _ => acc.push(current),
                     }
@@ -59,28 +64,25 @@ pub(crate) fn normalize(regex: &Hir) -> Hir {
 
             Hir::concat(result)
         }
+        HirKind::Empty | HirKind::Literal(_) | HirKind::Class(_) | HirKind::Look(_) => {
+            regex.clone()
+        }
     }
 }
 
-fn normalize_concat(parts: &Vec<Hir>) -> Hir {
-    if let Some((i, alts)) = parts.iter().enumerate().find_map(|(i, h)| match h.kind() {
-        HirKind::Alternation(alts) => Some((i, alts)),
-        _ => None,
-    }) {
-        let expanded = alts
-            .iter()
-            .map(|alt| {
-                let mut xs = Vec::new();
-                xs.extend_from_slice(&parts[..i]);
-                xs.push(alt.clone());
-                xs.extend_from_slice(&parts[i + 1..]);
-                normalize_concat(&xs)
-            })
-            .collect();
-
-        Hir::alternation(expanded)
-    } else {
-        Hir::concat(parts.clone())
+fn normalize_repeat(sub: &Hir, n: u32) -> Hir {
+    match n {
+        0 => Hir::empty(),
+        1 => normalize(sub),
+        n if n % 2 == 0 => {
+            let half = normalize_repeat(sub, n / 2);
+            normalize(&Hir::concat(vec![half.clone(), half]))
+        }
+        n => {
+            let half = normalize_repeat(sub, n / 2);
+            let doubled = normalize(&Hir::concat(vec![half.clone(), half]));
+            normalize(&Hir::concat(vec![sub.clone(), doubled]))
+        }
     }
 }
 
@@ -182,10 +184,14 @@ mod tests {
         }
 
         #[test]
+        fn range_repeat_to_infinite() {
+            //
+            check(r"a{2,}", r"aaa*");
+        }
+
+        #[test]
         fn unbounded_repeat_unchanged() {
-            // a+ should stay as-is since it's unbounded
-            let input = parse(r"a+");
-            assert_eq!(normalize(&input), input);
+            check(r"a+", r"aa*");
         }
 
         #[test]
@@ -207,12 +213,6 @@ mod tests {
         #[test]
         fn optional_wildcard_expands_to_alternation2() {
             check(r"[1-2]{3}", r"111|112|121|122|211|212|221|222");
-        }
-
-        #[test]
-        fn t() {
-            let input = parse(r".");
-            println!("{input:#?}")
         }
     }
 
@@ -255,6 +255,11 @@ mod tests {
         fn nested_alternation() {
             check(r"(a{2}|b{2})|c{3}", r"aa|bb|ccc");
         }
+
+        #[test]
+        fn nested_alternation_with_renge_repeat() {
+            check(r"(a{2,4}|b{2})|c{3}", r"aa|aaa|aaaa|bb|ccc");
+        }
     }
 
     // Complex tests
@@ -275,6 +280,14 @@ mod tests {
         fn deeply_nested() {
             check(r"((a{2}|b{2})(c{2}|d{2}))", r"aacc|aadd|bbcc|bbdd");
         }
+
+        #[test]
+        fn deeply_nested_range_repeat() {
+            check(
+                r"((a{2,3}|b{2,3})(c{2}|d{2}))",
+                r"aacc|aadd|aaacc|aaadd|bbcc|bbdd|bbbcc|bbbdd",
+            );
+        }
     }
 
     mod anchored {
@@ -291,53 +304,38 @@ mod tests {
         }
     }
 
-    mod a {
+    mod bench {
         use super::*;
         use std::hint;
         use std::time::Instant;
 
-        #[test]
-        fn test_dont_crash() {
-            // let input = r"(^a([1-9]|1[0-9]|2[0-9]|3[0-9]|4[0-9]|5[0-9])([0-9]{2})\.(b|g|g2|gd|na|q|w7)\.akamai\.net$)";
-            // let hir = parse(input);
-
-            // let start = Instant::now();
-            // let normalized = normalize(&hir);
-
-            // let elapsed = start.elapsed();
-
-            // println!("elapsed: {:?}", elapsed);
-
-            // // prevent optimization if benchmarking in release
-            // hint::black_box(normalized);
-
-            // let input = r"(^a([1-9]|1[0-9]|2[0-9]|3[0-9]|4[0-9]|5[0-9])([0-9]{2})\.(b|g|g2|gd|na|q|w7)\.akamai\.net$)|(^prfzquobemaspprl-a.akamaihd.net$)|(^www.moodpovest.com$)|(^www.campusvnweightlosswall.com$)|(^www.apparelbeachmint.com$)|(^yryirjrhqffsxwpg-a.akamaihd.net$)|(^www.firmextremedrink.com$)|(^www.buffalothreetronicsquad.com$)|(^www.desktopsoleixfarms.com$)|(^morer-emaging-disual.b-cdn.net$)|(^www.carzooadvice.com$)|(^www.phototrustrad.com$)|(^www.stickersrbspecial.com$)|(^a248.e.akamai.net$)|(^www.irantelcasinoruby.com$)|(^www.traveleryouthza.com$)|(^www.trisoftwaremotordream.com$)|(^alchzwwfzmrtgoaf-a.akamaihd.net$)|(^www.streambaracademysoftware.com$)|(^www.boxsignalnet.com$)|(^www.taxtomobilemarketplace.com$)|(^prod.global.ssl.fastly.net$)|(^www.oilcoffeembapixel.com$)|(^www.coffeeomgmultimediapsychic.net$)|(^www.whybdci.com$)|(^www.whizwiredak.com$)|(^www.networksservicestatmaryland.com$)|(^www.profkiwibellstudy.com$)|(^www.memodevmodelradar.com$)|(^www.checkbingnutritionclick.com$)|(^www.titanficentraleat.com$)|(^www.luxurybillitalylift.com$)|(^www.gsmyounginabox.com$)|(^www.storycitiesprofit.com$)|(^www.insightevilact.com$)|(^www.honeyelitengprotection.com$)|(^www.guiderevolutionligolf.com$)|(^www.mafiaearproperty.com$)|(^www.flexipixelsmagical.com$)|(^www.smithleafpartner.com$)|(^www.delivptattoo.com$)|(^www.contactiwebincorporated.com$)|(^www.watchescapins.com$)|(^www.investorbaltimoreloop.com$)";
-            // let hir = parse(input);
-
-            // let start = Instant::now();
-            // let normalized = normalize(&hir);
-
-            // let elapsed = start.elapsed();
-
-            // println!("elapsed: {:?}", elapsed);
-
-            // // prevent optimization if benchmarking in release
-            // hint::black_box(normalized);
-
-            // ^word[a-z]{3}(0|1|2|3..|9).{3-4}word$
-
-            let input = r"^(Qm[1-9A-HJ-NP-Za-km-z]{44})|(b[a-z2-7]{58})\.ipfs\.dweb\.link$";
+        fn bench_normalize(index: usize, input: &str) {
             let hir = parse(input);
 
             let start = Instant::now();
             let normalized = normalize(&hir);
-
             let elapsed = start.elapsed();
 
-            // prevent optimization if benchmarking in release
-            // hint::black_box(normalized);
+            println!("[{index}] elapsed: {elapsed:?}");
 
-            println!("elapsed: {:?}, {}", elapsed, normalized);
+            // prevent optimization if benchmarking in release
+            hint::black_box(normalized);
+        }
+
+        #[test]
+        fn test_dont_crash() {
+            let test_cases = [
+                r"(^a([1-9]|1[0-9]|2[0-9]|3[0-9]|4[0-9]|5[0-9])([0-9]{2})\.(b|g|g2|gd|na|q|w7)\.akamai\.net$)",
+                r"(^a([1-9]|1[0-9]|2[0-9]|3[0-9]|4[0-9]|5[0-9])([0-9]{2})\.(b|g|g2|gd|na|q|w7)\.akamai\.net$)|(^prfzquobemaspprl-a.akamaihd.net$)|(^www.moodpovest.com$)|(^www.campusvnweightlosswall.com$)|(^www.apparelbeachmint.com$)|(^yryirjrhqffsxwpg-a.akamaihd.net$)|(^www.firmextremedrink.com$)|(^www.buffalothreetronicsquad.com$)|(^www.desktopsoleixfarms.com$)|(^morer-emaging-disual.b-cdn.net$)|(^www.carzooadvice.com$)|(^www.phototrustrad.com$)|(^www.stickersrbspecial.com$)|(^a248.e.akamai.net$)|(^www.irantelcasinoruby.com$)|(^www.traveleryouthza.com$)|(^www.trisoftwaremotordream.com$)|(^alchzwwfzmrtgoaf-a.akamaihd.net$)|(^www.streambaracademysoftware.com$)|(^www.boxsignalnet.com$)|(^www.taxtomobilemarketplace.com$)|(^prod.global.ssl.fastly.net$)|(^www.oilcoffeembapixel.com$)|(^www.coffeeomgmultimediapsychic.net$)|(^www.whybdci.com$)|(^www.whizwiredak.com$)|(^www.networksservicestatmaryland.com$)|(^www.profkiwibellstudy.com$)|(^www.memodevmodelradar.com$)|(^www.checkbingnutritionclick.com$)|(^www.titanficentraleat.com$)|(^www.luxurybillitalylift.com$)|(^www.gsmyounginabox.com$)|(^www.storycitiesprofit.com$)|(^www.insightevilact.com$)|(^www.honeyelitengprotection.com$)|(^www.guiderevolutionligolf.com$)|(^www.mafiaearproperty.com$)|(^www.flexipixelsmagical.com$)|(^www.smithleafpartner.com$)|(^www.delivptattoo.com$)|(^www.contactiwebincorporated.com$)|(^www.watchescapins.com$)|(^www.investorbaltimoreloop.com$)",
+                r"^word[a-z]{3}(0|1|2|3|4|5|6|7|8|9).{3,4}word$",
+                r"^(Qm[0-9]{44})|(b[0-9]{58})\.ipfs\.dweb\.link$",
+                r"^(Qm[1-9A-HJ-NP-Za-km-z]{44})|(b[a-z2-7]{58})\.ipfs\.dweb\.link$",
+                r"^(Qm[1-9A-HJ-NP-Za-km-z]{44,58})|(b[a-z2-7]{58})\.ipfs\.dweb\.link$",
+            ];
+
+            test_cases.iter().enumerate().for_each(|(i, input)| {
+                bench_normalize(i, input);
+            })
         }
     }
 }
