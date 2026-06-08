@@ -260,6 +260,16 @@ mod tests {
         fn nested_alternation_with_renge_repeat() {
             check(r"(a{2,4}|b{2})|c{3}", r"aa|aaa|aaaa|bb|ccc");
         }
+
+        #[test]
+        fn alternation_with_big_range() {
+            check(r"a(.|a)", r"a.|aa");
+        }
+
+        #[test]
+        fn case_insensitive() {
+            check(r"(?i)a", r"a|A");
+        }
     }
 
     // Complex tests
@@ -296,11 +306,6 @@ mod tests {
         #[test]
         fn end_anchors_distribute_over_alternation() {
             check(r"a(a|b)$", r"aa$|ab$");
-        }
-
-        #[test]
-        fn a() {
-            check(r"a(.|a)", r"a.|aa");
         }
     }
 
