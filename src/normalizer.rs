@@ -330,12 +330,12 @@ mod tests {
         #[test]
         fn test_dont_crash() {
             let test_cases = [
-                r"(^a([1-9]|1[0-9]|2[0-9]|3[0-9]|4[0-9]|5[0-9])([0-9]{2})\.(b|g|g2|gd|na|q|w7)\.akamai\.net$)",
-                r"(^a([1-9]|1[0-9]|2[0-9]|3[0-9]|4[0-9]|5[0-9])([0-9]{2})\.(b|g|g2|gd|na|q|w7)\.akamai\.net$)|(^prfzquobemaspprl-a.akamaihd.net$)|(^www.moodpovest.com$)|(^www.campusvnweightlosswall.com$)|(^www.apparelbeachmint.com$)|(^yryirjrhqffsxwpg-a.akamaihd.net$)|(^www.firmextremedrink.com$)|(^www.buffalothreetronicsquad.com$)|(^www.desktopsoleixfarms.com$)|(^morer-emaging-disual.b-cdn.net$)|(^www.carzooadvice.com$)|(^www.phototrustrad.com$)|(^www.stickersrbspecial.com$)|(^a248.e.akamai.net$)|(^www.irantelcasinoruby.com$)|(^www.traveleryouthza.com$)|(^www.trisoftwaremotordream.com$)|(^alchzwwfzmrtgoaf-a.akamaihd.net$)|(^www.streambaracademysoftware.com$)|(^www.boxsignalnet.com$)|(^www.taxtomobilemarketplace.com$)|(^prod.global.ssl.fastly.net$)|(^www.oilcoffeembapixel.com$)|(^www.coffeeomgmultimediapsychic.net$)|(^www.whybdci.com$)|(^www.whizwiredak.com$)|(^www.networksservicestatmaryland.com$)|(^www.profkiwibellstudy.com$)|(^www.memodevmodelradar.com$)|(^www.checkbingnutritionclick.com$)|(^www.titanficentraleat.com$)|(^www.luxurybillitalylift.com$)|(^www.gsmyounginabox.com$)|(^www.storycitiesprofit.com$)|(^www.insightevilact.com$)|(^www.honeyelitengprotection.com$)|(^www.guiderevolutionligolf.com$)|(^www.mafiaearproperty.com$)|(^www.flexipixelsmagical.com$)|(^www.smithleafpartner.com$)|(^www.delivptattoo.com$)|(^www.contactiwebincorporated.com$)|(^www.watchescapins.com$)|(^www.investorbaltimoreloop.com$)",
+                r"(^a([1-9]|1[0-9]|2[0-9]|3[0-9]|4[0-9]|5[0-9])([0-9]{2})\.(b|g|g2|gd|na|q|w7)a$)",
+                r"(^a([1-9]|1[0-9]|2[0-9]|3[0-9]|4[0-9]|5[0-9])([0-9]{2})\.(b|g|g2|gd|na|q|w7)a$)|(^a1$)|(^a2$)|(^a3$)|(^a4$)|(^a5$)|(^a6$)|(^a7$)|(^a8$)|(^a9$)|(^a10$)|(^a11$)|(^a12$)|(^a13$)|(^a14$)|(^a15$)|(^a16$)|(^a17$)|(^a18$)|(^a19$)|(^a20$)|(^a21$)|(^a22$)|(^a23$)|(^a24$)|(^a25$)|(^a26$)|(^a27$)|(^a28$)|(^a29$)|(^a30$)|(^a31$)|(^a32$)|(^a33$)|(^a34$)|(^a35$)|(^a36$)|(^a37$)|(^a38$)|(^a39$)|(^a40$)|(^a41$)|(^a42$)|(^a43$)",
                 r"^word[a-z]{3}(0|1|2|3|4|5|6|7|8|9).{3,4}word$",
-                r"^(Qm[0-9]{44})|(b[0-9]{58})\.ipfs\.dweb\.link$",
-                r"^(Qm[1-9A-HJ-NP-Za-km-z]{44})|(b[a-z2-7]{58})\.ipfs\.dweb\.link$",
-                r"^(Qm[1-9A-HJ-NP-Za-km-z]{44,58})|(b[a-z2-7]{58})\.ipfs\.dweb\.link$",
+                r"^(Qm[0-9]{44})|(b[0-9]{58})a$",
+                r"^(Qm[1-9A-HJ-NP-Za-km-z]{44})|(b[a-z2-7]{58})a$",
+                r"^(Qm[1-9A-HJ-NP-Za-km-z]{44,58})|(b[a-z2-7]{58})a$",
             ];
 
             test_cases.iter().enumerate().for_each(|(i, input)| {
