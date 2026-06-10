@@ -1,5 +1,6 @@
+use crate::utilities::class_to_list_of_literal;
 use itertools::Itertools;
-use regex_syntax::hir::{self, Class, Hir, HirKind};
+use regex_syntax::hir::{self, Hir, HirKind};
 
 pub(crate) fn normalize(regex: &Hir) -> Hir {
     match regex.kind() {
@@ -45,19 +46,42 @@ pub(crate) fn normalize(regex: &Hir) -> Hir {
                 .iter()
                 .fold(vec![normalize(first)], |mut acc, current| {
                     let current = normalize(current);
-                    let prev = acc.last().unwrap();
+                    let prev = acc.pop().unwrap();
 
-                    match (or_literal(prev), or_literal(&current)) {
-                        (lhs, rhs) if lhs.len() * rhs.len() <= 5000 => {
-                            let merged = lhs
-                                .iter()
-                                .cartesian_product(rhs.iter())
-                                .map(|(x, y)| concat(x, y))
-                                .collect();
-                            *acc.last_mut().unwrap() = Hir::alternation(merged);
-                        }
-                        _ => acc.push(current),
+                    let lhs = or_literal(&prev);
+                    let rhs = or_literal(&current);
+
+                    // Helper closure to deduplicate the Cartesian product logic
+                    let merge_product = |left: &[Hir], right: &[Hir]| {
+                        left.iter()
+                            .cartesian_product(right.iter())
+                            .map(|(x, y)| concat(x, y))
+                            .collect::<Vec<_>>()
+                    };
+
+                    // `prev` is a single Concat node. Merge into its last element.
+                    if lhs.len() == 1
+                        && let HirKind::Concat(hirs) = lhs[0].kind()
+                    {
+                        let mut new_hirs = hirs.clone();
+                        let last_alts = or_literal(new_hirs.last().unwrap());
+
+                        *new_hirs.last_mut().unwrap() =
+                            Hir::alternation(merge_product(&last_alts, &rhs));
+                        acc.push(Hir::concat(new_hirs));
+
+                        return acc;
                     }
+
+                    if lhs.len() * rhs.len() <= 5000 {
+                        acc.push(Hir::alternation(merge_product(&lhs, &rhs)));
+                        return acc;
+                    }
+
+                    // Cannot merge (too large or incompatible).
+                    // Restore `prev` and append `current` separately.
+                    acc.push(prev);
+                    acc.push(current);
 
                     acc
                 });
@@ -103,7 +127,7 @@ fn concat(left: &Hir, right: &Hir) -> Hir {
 fn or_literal(regex: &Hir) -> Vec<Hir> {
     match regex.kind() {
         HirKind::Alternation(hirs) => hirs.iter().flat_map(or_literal).collect_vec(),
-        HirKind::Class(class) => extract_class_ranges(class),
+        HirKind::Class(class) => class_to_list_of_literal(class),
         HirKind::Literal(_)
         | HirKind::Empty
         | HirKind::Look(_)
@@ -111,32 +135,6 @@ fn or_literal(regex: &Hir) -> Vec<Hir> {
         | HirKind::Capture(_)
         | HirKind::Concat(_) => vec![regex.clone()],
     }
-}
-
-fn extract_class_ranges(class: &Class) -> Vec<Hir> {
-    let ranges: Vec<(u32, u32)> = match class {
-        Class::Unicode(u) => u
-            .iter()
-            .map(|r| (r.start() as u32, r.end() as u32))
-            .collect(),
-        Class::Bytes(b) => b
-            .iter()
-            .map(|r| (r.start() as u32, r.end() as u32))
-            .collect(),
-    };
-
-    if ranges.iter().any(|(_, max)| max > &255) {
-        return vec![Hir::class(class.clone())];
-    }
-
-    ranges
-        .iter()
-        .flat_map(|&(min, max)| {
-            (min..=max)
-                .map(|x| Hir::literal(vec![x as u8]))
-                .collect_vec()
-        })
-        .collect_vec()
 }
 
 #[cfg(test)]
@@ -154,7 +152,6 @@ mod tests {
         assert_eq!(normalized, expected, "normalize({input:?}) != {expected:?}");
     }
 
-    // Repetition tests
     mod repetition {
         use super::*;
 
@@ -185,7 +182,6 @@ mod tests {
 
         #[test]
         fn range_repeat_to_infinite() {
-            //
             check(r"a{2,}", r"aaa*");
         }
 
@@ -216,7 +212,6 @@ mod tests {
         }
     }
 
-    // Concat tests
     mod concat {
         use super::*;
 
@@ -227,12 +222,10 @@ mod tests {
 
         #[test]
         fn alternation_concat_merges() {
-            // (a|b)(c|d) should expand when small enough
             check(r"(a|b)(c|d)", r"ac|ad|bc|bd");
         }
     }
 
-    // Capture tests
     mod capture {
         use super::*;
 
@@ -242,7 +235,6 @@ mod tests {
         }
     }
 
-    // Alternation tests
     mod alternation {
         use super::*;
 
@@ -253,12 +245,12 @@ mod tests {
 
         #[test]
         fn nested_alternation() {
-            check(r"(a{2}|b{2})|c{3}", r"aa|bb|ccc");
+            check(r"(?:a{2}|b{2})|c{3}", r"aa|bb|ccc");
         }
 
         #[test]
         fn nested_alternation_with_renge_repeat() {
-            check(r"(a{2,4}|b{2})|c{3}", r"aa|aaa|aaaa|bb|ccc");
+            check(r"(?:a{2,4}|b{2})|c{3}", r"aa|aaa|aaaa|bb|ccc");
         }
 
         #[test]
@@ -272,7 +264,6 @@ mod tests {
         }
     }
 
-    // Complex tests
     mod complex {
         use super::*;
 
@@ -307,6 +298,12 @@ mod tests {
         fn end_anchors_distribute_over_alternation() {
             check(r"a(a|b)$", r"aa$|ab$");
         }
+
+        #[test]
+        fn a() {
+            check(r"(a|b)$", r"a$|b$");
+            check(r"^(a|b)$", r"^(?:a$|b$)");
+        }
     }
 
     mod bench {
@@ -323,7 +320,6 @@ mod tests {
 
             println!("[{index}] elapsed: {elapsed:?}");
 
-            // prevent optimization if benchmarking in release
             hint::black_box(normalized);
         }
 
