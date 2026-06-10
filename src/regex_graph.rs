@@ -3,7 +3,7 @@ use bstr::{BString, ByteVec};
 use itertools::Itertools;
 use regex_syntax::hir::{Hir, HirKind, Look};
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) enum NodeData {
     Start,
     End,
@@ -17,12 +17,74 @@ pub(crate) enum NodeData {
     Repetition { sub: RegexGraph },
 }
 
-#[derive(Debug)]
-pub(crate) struct Node {
-    data: NodeData,
+#[derive(Debug, Clone)]
+enum NodeStartIndex {
+    None,
+    Index(usize),
+    Range { min: usize, max: usize },
+    AtLeast(usize),
 }
 
-#[derive(Debug)]
+impl NodeStartIndex {
+    pub(self) fn add(&self, other: NodeStartIndex) -> NodeStartIndex {
+        match (self, other) {
+            (NodeStartIndex::None, other) => other,
+            (_, NodeStartIndex::None) => NodeStartIndex::None,
+            (NodeStartIndex::Index(a), NodeStartIndex::Index(b)) => NodeStartIndex::Index(a + b),
+            (
+                NodeStartIndex::Range {
+                    min: a_min,
+                    max: a_max,
+                },
+                NodeStartIndex::Range {
+                    min: b_min,
+                    max: b_max,
+                },
+            ) => NodeStartIndex::Range {
+                min: a_min + b_min,
+                max: a_max + b_max,
+            },
+            (NodeStartIndex::AtLeast(a), NodeStartIndex::AtLeast(b)) => {
+                NodeStartIndex::AtLeast(a + b)
+            }
+            (NodeStartIndex::Index(a), NodeStartIndex::AtLeast(b)) => {
+                NodeStartIndex::AtLeast(a + b)
+            }
+            (NodeStartIndex::Range { min: a_min, max: _ }, NodeStartIndex::AtLeast(b)) => {
+                NodeStartIndex::AtLeast(a_min + b)
+            }
+            (
+                NodeStartIndex::Range {
+                    min: a_min,
+                    max: a_max,
+                },
+                NodeStartIndex::Index(b),
+            ) => NodeStartIndex::Range {
+                min: a_min + b,
+                max: a_max + b,
+            },
+            (
+                NodeStartIndex::Index(a),
+                NodeStartIndex::Range {
+                    min: b_min,
+                    max: b_max,
+                },
+            ) => NodeStartIndex::Range {
+                min: a + b_min,
+                max: a + b_max,
+            },
+            _ => unimplemented!("Addition not defined for these variants"),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct Node {
+    data: NodeData,
+    start_index: NodeStartIndex,
+}
+
+#[derive(Debug, Clone)]
 pub(crate) struct RegexGraph {
     id: usize,
     regex_index: RegexIndex,
@@ -32,7 +94,14 @@ pub(crate) struct RegexGraph {
 impl RegexGraph {
     pub(crate) fn new(hir: &Hir, regex_index: RegexIndex) -> Vec<Self> {
         let hirs = Self::split(hir);
-        hirs.iter().map(Self::hir_to_graph).collect()
+        hirs.iter()
+            .map(Self::hir_to_graph)
+            .map(Self::optimize_nodes)
+            .map(|mut graph| {
+                graph.regex_index = regex_index;
+                graph
+            })
+            .collect()
     }
 
     fn split(hir: &Hir) -> Vec<Hir> {
@@ -90,7 +159,12 @@ impl RegexGraph {
 
     fn hir_to_nodes(hir: &Hir) -> Vec<Node> {
         // Helper closure to eliminate boilerplate when returning a single Node
-        let single = |data| vec![Node { data }];
+        let single = |data| {
+            vec![Node {
+                data,
+                start_index: NodeStartIndex::None,
+            }]
+        };
 
         match hir.kind() {
             HirKind::Empty => single(NodeData::Empty),
@@ -118,11 +192,13 @@ impl RegexGraph {
                             None => vec![
                                 Node {
                                     data: NodeData::Literal { word },
+                                    start_index: NodeStartIndex::None,
                                 },
                                 Node {
                                     data: NodeData::Repetition {
                                         sub: Self::hir_to_graph(sub),
                                     },
+                                    start_index: NodeStartIndex::None,
                                 },
                             ],
                             Some(m) if m == min => single(NodeData::Literal { word }),
@@ -158,13 +234,9 @@ impl RegexGraph {
                     }),
                 }
             }
-
-            HirKind::Capture(cap) => Self::hir_to_nodes(&cap.sub), // Removed clone!
+            HirKind::Capture(cap) => Self::hir_to_nodes(&cap.sub),
             HirKind::Concat(concat) => concat.iter().flat_map(Self::hir_to_nodes).collect(),
             HirKind::Alternation(alternation) => {
-                // OPTIMIZATION: `collect()` into an Option automatically short-circuits.
-                // If it hits a non-literal, it immediately stops and returns `None`,
-                // avoiding the double-iteration in your original `all()` + `map()` code.
                 let all_literals: Option<Vec<BString>> = alternation
                     .iter()
                     .map(|alter| {
@@ -187,7 +259,99 @@ impl RegexGraph {
         }
     }
 
-    // fn optimaize_graph(&mut self) -> Self {}
+    fn optimize_nodes(base: Self) -> Self {
+        let nodes = &base.nodes;
+        let mut new_nodes = Vec::with_capacity(nodes.len());
+
+        let mut prev = nodes.first().unwrap().clone();
+        let tail = &nodes[1..];
+
+        for node in tail {
+            match &prev.data {
+                NodeData::Start => {
+                    let mut new_node = node.clone();
+                    if !matches!(prev.start_index, NodeStartIndex::None) {
+                        unreachable!("Start node should not have a length index");
+                    }
+                    new_node.start_index = NodeStartIndex::Index(0);
+                    prev = new_node;
+                }
+                NodeData::End => unreachable!(),
+                NodeData::Literal { word } => {
+                    let mut new_node = node.clone();
+                    new_node.start_index = prev.start_index.add(NodeStartIndex::Index(word.len()));
+                    new_nodes.push(prev);
+                    prev = new_node;
+                }
+                NodeData::Temp { len } => {
+                    let mut new_node = node.clone();
+                    new_node.start_index = prev.start_index.add(NodeStartIndex::Index(*len));
+                    prev = new_node;
+                }
+                NodeData::TempRang { min_len, max_len } => {
+                    let mut new_node = node.clone();
+                    new_node.start_index = prev.start_index.add(NodeStartIndex::Range {
+                        min: *min_len,
+                        max: *max_len,
+                    });
+                    prev = new_node;
+                }
+                NodeData::TempInf { len } => {
+                    let mut new_node = node.clone();
+                    new_node.start_index = prev.start_index.add(NodeStartIndex::AtLeast(*len));
+                    prev = new_node;
+                }
+                NodeData::Empty => {
+                    let mut new_node = node.clone();
+                    new_node.start_index = prev.start_index.add(NodeStartIndex::Index(0));
+                    prev = new_node;
+                }
+                NodeData::OrLiteral { literals } => {
+                    let mut new_node = node.clone();
+                    let max = literals.iter().map(|lit| lit.len()).max().unwrap_or(0);
+                    let min = literals.iter().map(|lit| lit.len()).min().unwrap_or(0);
+                    new_node.start_index = prev.start_index.add(NodeStartIndex::Range { min, max });
+                    new_nodes.push(prev);
+                    prev = new_node;
+                }
+                NodeData::Repetition { sub } => {
+                    let optimized_sub = Self::optimize_nodes(sub.clone());
+                    if optimized_sub.nodes.len() == 1 {
+                        let single_node = &optimized_sub.nodes[0];
+                        match single_node.data {
+                            NodeData::Temp { .. }
+                            | NodeData::TempRang { .. }
+                            | NodeData::TempInf { .. }
+                            | NodeData::Empty => prev = node.clone(),
+                            NodeData::End | NodeData::Start => unreachable!(),
+                            _ => {
+                                let mut new_node = node.clone();
+                                new_node.data = NodeData::Repetition { sub: optimized_sub };
+                                new_node.start_index = NodeStartIndex::None;
+                                new_nodes.push(prev);
+                                prev = new_node;
+                            }
+                        }
+                    } else {
+                        let mut new_node = node.clone();
+                        new_node.data = NodeData::Repetition { sub: optimized_sub };
+                        new_node.start_index = NodeStartIndex::None;
+                        new_nodes.push(prev);
+                        prev = new_node;
+                    }
+                }
+                NodeData::OrGraph { graphs } => todo!(),
+            }
+        }
+
+        new_nodes.push(prev);
+
+        Self {
+            id: 0,
+            regex_index: 0,
+            nodes: new_nodes,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -276,7 +440,7 @@ mod tests {
 
         #[test]
         fn a() {
-            let input_hir = parse(r"^(?:a|b)[0-9]{2}.{10}test([0-9]){2,}test$");
+            let input_hir = parse(r"^(?:a|b)[0-9]{1,2}.{10}test$");
             let a = RegexGraph::new(&input_hir, 0);
             println!("{a:#?}");
         }
