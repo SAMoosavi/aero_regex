@@ -332,6 +332,7 @@ mod tests {
                 r"^(Qm[0-9]{44})|(b[0-9]{58})a$",
                 r"^(Qm[1-9A-HJ-NP-Za-km-z]{44})|(b[a-z2-7]{58})a$",
                 r"^(Qm[1-9A-HJ-NP-Za-km-z]{44,58})|(b[a-z2-7]{58})a$",
+                r"^(?:a|b)[0-9]{2,5}.{10}test([0-9]){2,}test$",
             ];
 
             test_cases.iter().enumerate().for_each(|(i, input)| {
