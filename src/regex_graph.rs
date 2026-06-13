@@ -1,7 +1,8 @@
 use crate::utilities::{RegexIndex, class_to_list_of_literal, extract_class_to_ranges};
-use bstr::{BString, ByteVec};
+use bstr::BString;
 use itertools::Itertools;
 use regex_syntax::hir::{Hir, HirKind, Look};
+use std::fmt;
 
 #[derive(Debug, Clone)]
 pub(crate) enum NodeData {
@@ -73,7 +74,12 @@ impl NodeStartIndex {
                 min: a + b_min,
                 max: a + b_max,
             },
-            _ => unimplemented!("Addition not defined for these variants"),
+            (NodeStartIndex::AtLeast(a), NodeStartIndex::Index(b)) => {
+                NodeStartIndex::AtLeast(a + b)
+            }
+            (NodeStartIndex::AtLeast(a), NodeStartIndex::Range { min: b_min, max: _ }) => {
+                NodeStartIndex::AtLeast(a + b_min)
+            }
         }
     }
 }
@@ -158,7 +164,6 @@ impl RegexGraph {
     }
 
     fn hir_to_nodes(hir: &Hir) -> Vec<Node> {
-        // Helper closure to eliminate boilerplate when returning a single Node
         let single = |data| {
             vec![Node {
                 data,
@@ -179,7 +184,6 @@ impl RegexGraph {
                 let min = rep.min as usize;
                 let max = rep.max.map(|m| m as usize);
 
-                // ZERO-COST BORROW: We borrow `sub` instead of cloning the entire AST branch
                 let sub = &rep.sub;
 
                 match sub.kind() {
@@ -228,7 +232,6 @@ impl RegexGraph {
                         sub: Self::hir_to_graph(&cap.sub),
                     }),
 
-                    // Merged fallback for Repetition, Look, Alternation, Concat
                     _ => single(NodeData::Repetition {
                         sub: Self::hir_to_graph(sub),
                     }),
@@ -261,8 +264,11 @@ impl RegexGraph {
 
     fn optimize_nodes(base: Self) -> Self {
         let nodes = &base.nodes;
-        let mut new_nodes = Vec::with_capacity(nodes.len());
+        if nodes.is_empty() {
+            return base;
+        }
 
+        let mut new_nodes = Vec::with_capacity(nodes.len());
         let mut prev = nodes.first().unwrap().clone();
         let tail = &nodes[1..];
 
@@ -354,12 +360,75 @@ impl RegexGraph {
     }
 }
 
+impl fmt::Display for RegexGraph {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let graph = self
+            .nodes
+            .iter()
+            .map(|n| n.to_string())
+            .collect::<Vec<_>>()
+            .join(" -> ");
+        write!(f, "{graph}")
+    }
+}
+
+impl fmt::Display for Node {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}@{}", self.data, self.start_index)
+    }
+}
+
+impl fmt::Display for NodeData {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let data_str = match &self {
+            NodeData::Start => "^".to_string(),
+            NodeData::End => "$".to_string(),
+            NodeData::Literal { word } => format!("'{word}'"),
+            NodeData::OrLiteral { literals } => {
+                let lits = literals
+                    .iter()
+                    .map(|word| format!("'{word}'"))
+                    .collect::<Vec<_>>()
+                    .join("|");
+                format!("({lits})")
+            }
+            NodeData::OrGraph { graphs } => {
+                let gs = graphs
+                    .iter()
+                    .map(|g| g.to_string())
+                    .collect::<Vec<_>>()
+                    .join(" | ");
+                format!("OR({gs})")
+            }
+            NodeData::Temp { len } => format!(".{{{len}}}"),
+            NodeData::TempRang { min_len, max_len } => format!(".{{{min_len},{max_len}}}"),
+            NodeData::TempInf { len } => format!(".{{{len}, }}"),
+            NodeData::Empty => "ε".to_string(),
+            NodeData::Repetition { sub } => format!("REP([{sub}] )"),
+        };
+
+        write!(f, "{data_str}")
+    }
+}
+
+impl fmt::Display for NodeStartIndex {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let idx_str = match &self {
+            NodeStartIndex::None => "?".to_string(),
+            NodeStartIndex::Index(i) => i.to_string(),
+            NodeStartIndex::Range { min, max } => format!("{min}..{max}"),
+            NodeStartIndex::AtLeast(i) => format!("{i}.."),
+        };
+
+        write!(f, "{idx_str}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use regex_syntax::Parser;
-
     use crate::normalizer;
+    use regex_syntax::Parser;
 
     fn parse(pattern: &str) -> Hir {
         normalizer::normalize(&Parser::new().parse(pattern).unwrap())
@@ -371,24 +440,23 @@ mod tests {
         fn check_split(input: &str, expected: &[&str]) {
             let input_hir = parse(input);
             let expected_hirs: Vec<_> = expected.iter().map(|&s| parse(s)).collect();
-
             assert_eq!(RegexGraph::split(&input_hir), expected_hirs);
         }
 
         #[test]
-        fn test_no_alternation() {
+        fn no_alternation() {
             check_split(r"abc", &[r"abc"]);
             check_split(r"^hello$", &[r"^hello$"]);
         }
 
         #[test]
-        fn test_simple_alternation() {
+        fn simple_alternation() {
             check_split(r"a|b", &[r"a", r"b"]);
             check_split(r"aa|bb|cc", &[r"aa", r"bb", r"cc"]);
         }
 
         #[test]
-        fn test_anchors_and_alternations() {
+        fn anchors_and_alternations() {
             check_split(r"^(a|b)", &[r"^a", r"^b"]);
             check_split(r"(a|b)$", &[r"a$", r"b$"]);
             check_split(r"^(a|b)$", &[r"^a$", r"^b$"]);
@@ -399,31 +467,31 @@ mod tests {
         }
 
         #[test]
-        fn test_cartesian_product_multiple_groups() {
+        fn cartesian_product_multiple_groups() {
             check_split(r"(?:a|b)(?:c|d)", &[r"ac", r"ad", r"bc", r"bd"]);
         }
 
         #[test]
-        fn test_nested_alternations() {
+        fn nested_alternations() {
             check_split(r"(?:a|(?:b|c))", &[r"a", r"b", r"c"]);
             check_split(r"^(?:a|(?:b|c))$", &[r"^a$", r"^b$", r"^c$"]);
         }
 
         #[test]
-        fn test_capture_groups_are_preserved() {
+        fn capture_groups_are_preserved() {
             check_split(r"(a|b)", &[r"a", r"b"]);
-
             check_split(r"^(a|b)(c|d)", &[r"^ac", r"^ad", r"^bc", r"^bd"]);
         }
 
         #[test]
-        fn test_repetitions_are_not_split() {
+        fn repetitions_are_not_split() {
             check_split(r"(?:a|b)*", &[r"(?:a|b)*"]);
             check_split(r"^(a|b)+$", &[r"^a(a|b)*$", r"^b(a|b)*$"]);
+            check_split(r"^a.{2,4}b$", &[r"^a.{2,4}b$"]);
         }
 
         #[test]
-        fn test_complex_real_world_scenario() {
+        fn complex_real_world_scenario() {
             check_split(
                 r"^GET /(?:index|about|contact)\.html$",
                 &[
@@ -438,11 +506,302 @@ mod tests {
     mod create_graph {
         use super::*;
 
+        fn check_graphs(input: &str, expected: &[&str]) {
+            let input_hir = parse(input);
+            let graphs = RegexGraph::new(&input_hir, 0);
+
+            let actual: Vec<String> = graphs.iter().map(|g| g.to_string()).collect();
+
+            assert_eq!(
+                actual.len(),
+                expected.len(),
+                "Graph count mismatch for '{input}'.\nExpected: {expected:#?}\nActual: {actual:#?}"
+            );
+
+            for (i, (act, exp)) in actual.iter().zip(expected.iter()).enumerate() {
+                assert_eq!(act, exp, "Graph mismatch at index {i} for '{input}'");
+            }
+        }
+
         #[test]
-        fn a() {
-            let input_hir = parse(r"^(?:a|b)[0-9]{1,2}.{10}test$");
-            let a = RegexGraph::new(&input_hir, 0);
-            println!("{a:#?}");
+        fn simple_literal() {
+            check_graphs("abc", &["'abc'@?"]);
+        }
+
+        #[test]
+        fn start_anchor() {
+            check_graphs("^abc", &["'abc'@0"]);
+        }
+
+        #[test]
+        fn end_anchor() {
+            check_graphs("abc$", &["'abc'@? -> $@3"]);
+        }
+
+        #[test]
+        fn both_anchors() {
+            check_graphs("^abc$", &["'abc'@0 -> $@3"]);
+        }
+
+        #[test]
+        fn temp_skip() {
+            check_graphs("^a.b$", &["'a'@0 -> 'b'@2 -> $@3"]);
+        }
+
+        #[test]
+        fn temp_range() {
+            // Fail
+            check_graphs("^a.{2,4}b$", &["'a'@0 -> 'b'@3..5 -> $@4..6"]);
+        }
+
+        #[test]
+        fn unbounded_temp() {
+            // Fail
+            check_graphs("^a.*b$", &["'a'@0 -> 'b'@0.. -> $@1.."]);
+        }
+
+        #[test]
+        fn alternation_split() {
+            check_graphs("^(a|b)c$", &["'ac'@0 -> $@2", "'bc'@0 -> $@2"]);
+        }
+
+        #[test]
+        fn or_literal() {
+            check_graphs("a|b", &["'a'@?", "'b'@?"]);
+        }
+
+        #[test]
+        fn repetition_with_or() {
+            check_graphs("^(a|b)*c$", &["'c'@? -> $@1"]);
+        }
+
+        #[test]
+        fn complex_real_world() {
+            check_graphs(
+                "^(?:a|b)[0-9]{1,2}.{10}test$",
+                &[
+                    "'a0'@0 -> 'test'@12 -> $@16",
+                    "'a1'@0 -> 'test'@12 -> $@16",
+                    "'a2'@0 -> 'test'@12 -> $@16",
+                    "'a3'@0 -> 'test'@12 -> $@16",
+                    "'a4'@0 -> 'test'@12 -> $@16",
+                    "'a5'@0 -> 'test'@12 -> $@16",
+                    "'a6'@0 -> 'test'@12 -> $@16",
+                    "'a7'@0 -> 'test'@12 -> $@16",
+                    "'a8'@0 -> 'test'@12 -> $@16",
+                    "'a9'@0 -> 'test'@12 -> $@16",
+                    "'a00'@0 -> 'test'@13 -> $@17",
+                    "'a01'@0 -> 'test'@13 -> $@17",
+                    "'a02'@0 -> 'test'@13 -> $@17",
+                    "'a03'@0 -> 'test'@13 -> $@17",
+                    "'a04'@0 -> 'test'@13 -> $@17",
+                    "'a05'@0 -> 'test'@13 -> $@17",
+                    "'a06'@0 -> 'test'@13 -> $@17",
+                    "'a07'@0 -> 'test'@13 -> $@17",
+                    "'a08'@0 -> 'test'@13 -> $@17",
+                    "'a09'@0 -> 'test'@13 -> $@17",
+                    "'a10'@0 -> 'test'@13 -> $@17",
+                    "'a11'@0 -> 'test'@13 -> $@17",
+                    "'a12'@0 -> 'test'@13 -> $@17",
+                    "'a13'@0 -> 'test'@13 -> $@17",
+                    "'a14'@0 -> 'test'@13 -> $@17",
+                    "'a15'@0 -> 'test'@13 -> $@17",
+                    "'a16'@0 -> 'test'@13 -> $@17",
+                    "'a17'@0 -> 'test'@13 -> $@17",
+                    "'a18'@0 -> 'test'@13 -> $@17",
+                    "'a19'@0 -> 'test'@13 -> $@17",
+                    "'a20'@0 -> 'test'@13 -> $@17",
+                    "'a21'@0 -> 'test'@13 -> $@17",
+                    "'a22'@0 -> 'test'@13 -> $@17",
+                    "'a23'@0 -> 'test'@13 -> $@17",
+                    "'a24'@0 -> 'test'@13 -> $@17",
+                    "'a25'@0 -> 'test'@13 -> $@17",
+                    "'a26'@0 -> 'test'@13 -> $@17",
+                    "'a27'@0 -> 'test'@13 -> $@17",
+                    "'a28'@0 -> 'test'@13 -> $@17",
+                    "'a29'@0 -> 'test'@13 -> $@17",
+                    "'a30'@0 -> 'test'@13 -> $@17",
+                    "'a31'@0 -> 'test'@13 -> $@17",
+                    "'a32'@0 -> 'test'@13 -> $@17",
+                    "'a33'@0 -> 'test'@13 -> $@17",
+                    "'a34'@0 -> 'test'@13 -> $@17",
+                    "'a35'@0 -> 'test'@13 -> $@17",
+                    "'a36'@0 -> 'test'@13 -> $@17",
+                    "'a37'@0 -> 'test'@13 -> $@17",
+                    "'a38'@0 -> 'test'@13 -> $@17",
+                    "'a39'@0 -> 'test'@13 -> $@17",
+                    "'a40'@0 -> 'test'@13 -> $@17",
+                    "'a41'@0 -> 'test'@13 -> $@17",
+                    "'a42'@0 -> 'test'@13 -> $@17",
+                    "'a43'@0 -> 'test'@13 -> $@17",
+                    "'a44'@0 -> 'test'@13 -> $@17",
+                    "'a45'@0 -> 'test'@13 -> $@17",
+                    "'a46'@0 -> 'test'@13 -> $@17",
+                    "'a47'@0 -> 'test'@13 -> $@17",
+                    "'a48'@0 -> 'test'@13 -> $@17",
+                    "'a49'@0 -> 'test'@13 -> $@17",
+                    "'a50'@0 -> 'test'@13 -> $@17",
+                    "'a51'@0 -> 'test'@13 -> $@17",
+                    "'a52'@0 -> 'test'@13 -> $@17",
+                    "'a53'@0 -> 'test'@13 -> $@17",
+                    "'a54'@0 -> 'test'@13 -> $@17",
+                    "'a55'@0 -> 'test'@13 -> $@17",
+                    "'a56'@0 -> 'test'@13 -> $@17",
+                    "'a57'@0 -> 'test'@13 -> $@17",
+                    "'a58'@0 -> 'test'@13 -> $@17",
+                    "'a59'@0 -> 'test'@13 -> $@17",
+                    "'a60'@0 -> 'test'@13 -> $@17",
+                    "'a61'@0 -> 'test'@13 -> $@17",
+                    "'a62'@0 -> 'test'@13 -> $@17",
+                    "'a63'@0 -> 'test'@13 -> $@17",
+                    "'a64'@0 -> 'test'@13 -> $@17",
+                    "'a65'@0 -> 'test'@13 -> $@17",
+                    "'a66'@0 -> 'test'@13 -> $@17",
+                    "'a67'@0 -> 'test'@13 -> $@17",
+                    "'a68'@0 -> 'test'@13 -> $@17",
+                    "'a69'@0 -> 'test'@13 -> $@17",
+                    "'a70'@0 -> 'test'@13 -> $@17",
+                    "'a71'@0 -> 'test'@13 -> $@17",
+                    "'a72'@0 -> 'test'@13 -> $@17",
+                    "'a73'@0 -> 'test'@13 -> $@17",
+                    "'a74'@0 -> 'test'@13 -> $@17",
+                    "'a75'@0 -> 'test'@13 -> $@17",
+                    "'a76'@0 -> 'test'@13 -> $@17",
+                    "'a77'@0 -> 'test'@13 -> $@17",
+                    "'a78'@0 -> 'test'@13 -> $@17",
+                    "'a79'@0 -> 'test'@13 -> $@17",
+                    "'a80'@0 -> 'test'@13 -> $@17",
+                    "'a81'@0 -> 'test'@13 -> $@17",
+                    "'a82'@0 -> 'test'@13 -> $@17",
+                    "'a83'@0 -> 'test'@13 -> $@17",
+                    "'a84'@0 -> 'test'@13 -> $@17",
+                    "'a85'@0 -> 'test'@13 -> $@17",
+                    "'a86'@0 -> 'test'@13 -> $@17",
+                    "'a87'@0 -> 'test'@13 -> $@17",
+                    "'a88'@0 -> 'test'@13 -> $@17",
+                    "'a89'@0 -> 'test'@13 -> $@17",
+                    "'a90'@0 -> 'test'@13 -> $@17",
+                    "'a91'@0 -> 'test'@13 -> $@17",
+                    "'a92'@0 -> 'test'@13 -> $@17",
+                    "'a93'@0 -> 'test'@13 -> $@17",
+                    "'a94'@0 -> 'test'@13 -> $@17",
+                    "'a95'@0 -> 'test'@13 -> $@17",
+                    "'a96'@0 -> 'test'@13 -> $@17",
+                    "'a97'@0 -> 'test'@13 -> $@17",
+                    "'a98'@0 -> 'test'@13 -> $@17",
+                    "'a99'@0 -> 'test'@13 -> $@17",
+                    "'b0'@0 -> 'test'@12 -> $@16",
+                    "'b1'@0 -> 'test'@12 -> $@16",
+                    "'b2'@0 -> 'test'@12 -> $@16",
+                    "'b3'@0 -> 'test'@12 -> $@16",
+                    "'b4'@0 -> 'test'@12 -> $@16",
+                    "'b5'@0 -> 'test'@12 -> $@16",
+                    "'b6'@0 -> 'test'@12 -> $@16",
+                    "'b7'@0 -> 'test'@12 -> $@16",
+                    "'b8'@0 -> 'test'@12 -> $@16",
+                    "'b9'@0 -> 'test'@12 -> $@16",
+                    "'b00'@0 -> 'test'@13 -> $@17",
+                    "'b01'@0 -> 'test'@13 -> $@17",
+                    "'b02'@0 -> 'test'@13 -> $@17",
+                    "'b03'@0 -> 'test'@13 -> $@17",
+                    "'b04'@0 -> 'test'@13 -> $@17",
+                    "'b05'@0 -> 'test'@13 -> $@17",
+                    "'b06'@0 -> 'test'@13 -> $@17",
+                    "'b07'@0 -> 'test'@13 -> $@17",
+                    "'b08'@0 -> 'test'@13 -> $@17",
+                    "'b09'@0 -> 'test'@13 -> $@17",
+                    "'b10'@0 -> 'test'@13 -> $@17",
+                    "'b11'@0 -> 'test'@13 -> $@17",
+                    "'b12'@0 -> 'test'@13 -> $@17",
+                    "'b13'@0 -> 'test'@13 -> $@17",
+                    "'b14'@0 -> 'test'@13 -> $@17",
+                    "'b15'@0 -> 'test'@13 -> $@17",
+                    "'b16'@0 -> 'test'@13 -> $@17",
+                    "'b17'@0 -> 'test'@13 -> $@17",
+                    "'b18'@0 -> 'test'@13 -> $@17",
+                    "'b19'@0 -> 'test'@13 -> $@17",
+                    "'b20'@0 -> 'test'@13 -> $@17",
+                    "'b21'@0 -> 'test'@13 -> $@17",
+                    "'b22'@0 -> 'test'@13 -> $@17",
+                    "'b23'@0 -> 'test'@13 -> $@17",
+                    "'b24'@0 -> 'test'@13 -> $@17",
+                    "'b25'@0 -> 'test'@13 -> $@17",
+                    "'b26'@0 -> 'test'@13 -> $@17",
+                    "'b27'@0 -> 'test'@13 -> $@17",
+                    "'b28'@0 -> 'test'@13 -> $@17",
+                    "'b29'@0 -> 'test'@13 -> $@17",
+                    "'b30'@0 -> 'test'@13 -> $@17",
+                    "'b31'@0 -> 'test'@13 -> $@17",
+                    "'b32'@0 -> 'test'@13 -> $@17",
+                    "'b33'@0 -> 'test'@13 -> $@17",
+                    "'b34'@0 -> 'test'@13 -> $@17",
+                    "'b35'@0 -> 'test'@13 -> $@17",
+                    "'b36'@0 -> 'test'@13 -> $@17",
+                    "'b37'@0 -> 'test'@13 -> $@17",
+                    "'b38'@0 -> 'test'@13 -> $@17",
+                    "'b39'@0 -> 'test'@13 -> $@17",
+                    "'b40'@0 -> 'test'@13 -> $@17",
+                    "'b41'@0 -> 'test'@13 -> $@17",
+                    "'b42'@0 -> 'test'@13 -> $@17",
+                    "'b43'@0 -> 'test'@13 -> $@17",
+                    "'b44'@0 -> 'test'@13 -> $@17",
+                    "'b45'@0 -> 'test'@13 -> $@17",
+                    "'b46'@0 -> 'test'@13 -> $@17",
+                    "'b47'@0 -> 'test'@13 -> $@17",
+                    "'b48'@0 -> 'test'@13 -> $@17",
+                    "'b49'@0 -> 'test'@13 -> $@17",
+                    "'b50'@0 -> 'test'@13 -> $@17",
+                    "'b51'@0 -> 'test'@13 -> $@17",
+                    "'b52'@0 -> 'test'@13 -> $@17",
+                    "'b53'@0 -> 'test'@13 -> $@17",
+                    "'b54'@0 -> 'test'@13 -> $@17",
+                    "'b55'@0 -> 'test'@13 -> $@17",
+                    "'b56'@0 -> 'test'@13 -> $@17",
+                    "'b57'@0 -> 'test'@13 -> $@17",
+                    "'b58'@0 -> 'test'@13 -> $@17",
+                    "'b59'@0 -> 'test'@13 -> $@17",
+                    "'b60'@0 -> 'test'@13 -> $@17",
+                    "'b61'@0 -> 'test'@13 -> $@17",
+                    "'b62'@0 -> 'test'@13 -> $@17",
+                    "'b63'@0 -> 'test'@13 -> $@17",
+                    "'b64'@0 -> 'test'@13 -> $@17",
+                    "'b65'@0 -> 'test'@13 -> $@17",
+                    "'b66'@0 -> 'test'@13 -> $@17",
+                    "'b67'@0 -> 'test'@13 -> $@17",
+                    "'b68'@0 -> 'test'@13 -> $@17",
+                    "'b69'@0 -> 'test'@13 -> $@17",
+                    "'b70'@0 -> 'test'@13 -> $@17",
+                    "'b71'@0 -> 'test'@13 -> $@17",
+                    "'b72'@0 -> 'test'@13 -> $@17",
+                    "'b73'@0 -> 'test'@13 -> $@17",
+                    "'b74'@0 -> 'test'@13 -> $@17",
+                    "'b75'@0 -> 'test'@13 -> $@17",
+                    "'b76'@0 -> 'test'@13 -> $@17",
+                    "'b77'@0 -> 'test'@13 -> $@17",
+                    "'b78'@0 -> 'test'@13 -> $@17",
+                    "'b79'@0 -> 'test'@13 -> $@17",
+                    "'b80'@0 -> 'test'@13 -> $@17",
+                    "'b81'@0 -> 'test'@13 -> $@17",
+                    "'b82'@0 -> 'test'@13 -> $@17",
+                    "'b83'@0 -> 'test'@13 -> $@17",
+                    "'b84'@0 -> 'test'@13 -> $@17",
+                    "'b85'@0 -> 'test'@13 -> $@17",
+                    "'b86'@0 -> 'test'@13 -> $@17",
+                    "'b87'@0 -> 'test'@13 -> $@17",
+                    "'b88'@0 -> 'test'@13 -> $@17",
+                    "'b89'@0 -> 'test'@13 -> $@17",
+                    "'b90'@0 -> 'test'@13 -> $@17",
+                    "'b91'@0 -> 'test'@13 -> $@17",
+                    "'b92'@0 -> 'test'@13 -> $@17",
+                    "'b93'@0 -> 'test'@13 -> $@17",
+                    "'b94'@0 -> 'test'@13 -> $@17",
+                    "'b95'@0 -> 'test'@13 -> $@17",
+                    "'b96'@0 -> 'test'@13 -> $@17",
+                    "'b97'@0 -> 'test'@13 -> $@17",
+                    "'b98'@0 -> 'test'@13 -> $@17",
+                    "'b99'@0 -> 'test'@13 -> $@17",
+                ],
+            );
         }
     }
 }
