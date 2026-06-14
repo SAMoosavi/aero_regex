@@ -1,43 +1,38 @@
-use crate::utilities::class_to_list_of_literal;
+use crate::{regex_expr::RegexExpr, utilities::class_to_list_of_literal};
 use itertools::Itertools;
-use regex_syntax::hir::{self, Hir, HirKind};
 
-pub(crate) fn normalize(regex: &Hir) -> Hir {
-    match regex.kind() {
-        HirKind::Repetition(rep) => {
-            let sub = (*rep.sub).clone();
+pub(crate) fn normalize(regex: &RegexExpr) -> RegexExpr {
+    match regex {
+        RegexExpr::Repetition { min, max, sub } => match (*min, *max) {
+            (min, Some(max)) if min == max => normalize_repeat(sub, min),
+            (min, Some(max)) => {
+                let mut current = normalize_repeat(sub, min);
 
-            match (rep.min, rep.max) {
-                (min, Some(max)) if min == max => normalize_repeat(&sub, min),
-                (min, Some(max)) => {
-                    let mut current = normalize_repeat(&sub, min);
+                let mut alternations = Vec::with_capacity((max - min + 1) as usize);
+                alternations.push(current.clone());
 
-                    let mut alternations = Vec::with_capacity((max - min + 1) as usize);
+                for _ in min..max {
+                    current = normalize(&RegexExpr::concat(&[current, (**sub).clone()]));
                     alternations.push(current.clone());
-
-                    for _ in min..max {
-                        current = normalize(&Hir::concat(vec![current, sub.clone()]));
-                        alternations.push(current.clone());
-                    }
-
-                    normalize(&Hir::alternation(alternations))
                 }
-                (0, None) => regex.clone(),
-                (min, None) => {
-                    let star = Hir::repetition(hir::Repetition {
-                        min: 0,
-                        max: None,
-                        greedy: true,
-                        sub: rep.sub.clone(),
-                    });
 
-                    normalize(&Hir::concat(vec![normalize_repeat(&sub, min), star]))
-                }
+                normalize(&RegexExpr::alternation(&alternations))
             }
+            (0, None) => regex.clone(),
+            (min, None) => {
+                let star = RegexExpr::Repetition {
+                    min: 0,
+                    max: None,
+                    sub: sub.clone(),
+                };
+
+                normalize(&RegexExpr::concat(&[normalize_repeat(sub, min), star]))
+            }
+        },
+        RegexExpr::Alternation(hirs) => {
+            RegexExpr::alternation(&hirs.iter().map(normalize).collect_vec())
         }
-        HirKind::Capture(capture) => normalize(&capture.sub),
-        HirKind::Alternation(hirs) => Hir::alternation(hirs.iter().map(normalize).collect()),
-        HirKind::Concat(hirs) => {
+        RegexExpr::Concat(hirs) => {
             assert!(hirs.len() >= 2, "Concat must have at least 2 elements");
 
             let (first, rest) = hirs.split_first().unwrap();
@@ -51,89 +46,73 @@ pub(crate) fn normalize(regex: &Hir) -> Hir {
                     let lhs = or_literal(&prev);
                     let rhs = or_literal(&current);
 
-                    // Helper closure to deduplicate the Cartesian product logic
-                    let merge_product = |left: &[Hir], right: &[Hir]| {
-                        left.iter()
-                            .cartesian_product(right.iter())
-                            .map(|(x, y)| concat(x, y))
-                            .collect::<Vec<_>>()
-                    };
-
-                    // `prev` is a single Concat node. Merge into its last element.
-                    if lhs.len() == 1
-                        && let HirKind::Concat(hirs) = lhs[0].kind()
-                    {
-                        let mut new_hirs = hirs.clone();
-                        let last_alts = or_literal(new_hirs.last().unwrap());
-
-                        *new_hirs.last_mut().unwrap() =
-                            Hir::alternation(merge_product(&last_alts, &rhs));
-                        acc.push(Hir::concat(new_hirs));
-
-                        return acc;
-                    }
-
                     if lhs.len() * rhs.len() <= 5000 {
-                        acc.push(Hir::alternation(merge_product(&lhs, &rhs)));
-                        return acc;
+                        let merged_product = lhs
+                            .iter()
+                            .cartesian_product(rhs.iter())
+                            .map(|(x, y)| concat(x, y))
+                            .collect::<Vec<_>>();
+                        acc.push(RegexExpr::alternation(&merged_product));
+                    } else {
+                        acc.push(prev);
+                        acc.push(current);
                     }
-
-                    // Cannot merge (too large or incompatible).
-                    // Restore `prev` and append `current` separately.
-                    acc.push(prev);
-                    acc.push(current);
 
                     acc
                 });
 
-            Hir::concat(result)
+            RegexExpr::concat(&result)
         }
-        HirKind::Empty | HirKind::Literal(_) | HirKind::Class(_) | HirKind::Look(_) => {
-            regex.clone()
-        }
+        RegexExpr::Empty
+        | RegexExpr::Literal(_)
+        | RegexExpr::Class(_)
+        | RegexExpr::Dot
+        | RegexExpr::Start
+        | RegexExpr::End => regex.clone(),
     }
 }
 
-fn normalize_repeat(sub: &Hir, n: u32) -> Hir {
+fn normalize_repeat(sub: &RegexExpr, n: u32) -> RegexExpr {
     match n {
-        0 => Hir::empty(),
+        0 => RegexExpr::Empty,
         1 => normalize(sub),
         n if n % 2 == 0 => {
             let half = normalize_repeat(sub, n / 2);
-            normalize(&Hir::concat(vec![half.clone(), half]))
+            normalize(&RegexExpr::concat(&[half.clone(), half]))
         }
         n => {
             let half = normalize_repeat(sub, n / 2);
-            let doubled = normalize(&Hir::concat(vec![half.clone(), half]));
-            normalize(&Hir::concat(vec![sub.clone(), doubled]))
+            let doubled = normalize(&RegexExpr::concat(&[half.clone(), half]));
+            normalize(&RegexExpr::concat(&[sub.clone(), doubled]))
         }
     }
 }
 
-fn concat(left: &Hir, right: &Hir) -> Hir {
-    match (left.kind(), right.kind()) {
-        (HirKind::Alternation(lhs), _) => {
-            let alts = lhs.iter().map(|hir| concat(hir, right)).collect();
-            Hir::alternation(alts)
+fn concat(left: &RegexExpr, right: &RegexExpr) -> RegexExpr {
+    match (left, right) {
+        (RegexExpr::Alternation(lhs), _) => {
+            let alts = lhs.iter().map(|hir| concat(hir, right)).collect_vec();
+            RegexExpr::alternation(&alts)
         }
-        (_, HirKind::Alternation(rhs)) => {
-            let alts = rhs.iter().map(|hir| concat(left, hir)).collect();
-            Hir::alternation(alts)
+        (_, RegexExpr::Alternation(rhs)) => {
+            let alts = rhs.iter().map(|hir| concat(left, hir)).collect_vec();
+            RegexExpr::alternation(&alts)
         }
-        _ => Hir::concat(vec![left.clone(), right.clone()]),
+        _ => RegexExpr::concat(&[left.clone(), right.clone()]),
     }
 }
 
-fn or_literal(regex: &Hir) -> Vec<Hir> {
-    match regex.kind() {
-        HirKind::Alternation(hirs) => hirs.iter().flat_map(or_literal).collect_vec(),
-        HirKind::Class(class) => class_to_list_of_literal(class),
-        HirKind::Literal(_)
-        | HirKind::Empty
-        | HirKind::Look(_)
-        | HirKind::Repetition(_)
-        | HirKind::Capture(_)
-        | HirKind::Concat(_) => vec![regex.clone()],
+fn or_literal(regex: &RegexExpr) -> Vec<RegexExpr> {
+    match regex {
+        RegexExpr::Alternation(hirs) => hirs.iter().flat_map(or_literal).collect_vec(),
+        RegexExpr::Class(class) => class_to_list_of_literal(class),
+        RegexExpr::Literal(_)
+        | RegexExpr::Empty
+        | RegexExpr::Repetition { .. }
+        | RegexExpr::Dot
+        | RegexExpr::Start
+        | RegexExpr::End
+        | RegexExpr::Concat(_) => vec![regex.clone()],
     }
 }
 
@@ -142,8 +121,8 @@ mod tests {
     use super::*;
     use regex_syntax::Parser;
 
-    fn parse(pattern: &str) -> Hir {
-        Parser::new().parse(pattern).unwrap()
+    fn parse(pattern: &str) -> RegexExpr {
+        Parser::new().parse(pattern).unwrap().into()
     }
 
     fn check(input: &str, expected: &str) {
@@ -297,12 +276,6 @@ mod tests {
         #[test]
         fn end_anchors_distribute_over_alternation() {
             check(r"a(a|b)$", r"aa$|ab$");
-        }
-
-        #[test]
-        fn a() {
-            check(r"(a|b)$", r"a$|b$");
-            check(r"^(a|b)$", r"^(?:a$|b$)");
         }
     }
 

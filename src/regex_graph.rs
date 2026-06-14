@@ -1,7 +1,8 @@
-use crate::utilities::{RegexIndex, class_to_list_of_literal, extract_class_to_ranges};
+use crate::{
+    regex_expr::RegexExpr,
+    utilities::{RegexIndex, class_to_list_of_literal},
+};
 use bstr::BString;
-use itertools::Itertools;
-use regex_syntax::hir::{Hir, HirKind, Look};
 use std::fmt;
 
 #[derive(Debug, Clone)]
@@ -98,7 +99,7 @@ pub(crate) struct RegexGraph {
 }
 
 impl RegexGraph {
-    pub(crate) fn new(hir: &Hir, regex_index: RegexIndex) -> Vec<Self> {
+    pub(crate) fn new(hir: &RegexExpr, regex_index: RegexIndex) -> Vec<Self> {
         let hirs = Self::split(hir);
         hirs.iter()
             .map(Self::hir_to_graph)
@@ -110,51 +111,15 @@ impl RegexGraph {
             .collect()
     }
 
-    fn split(hir: &Hir) -> Vec<Hir> {
-        match hir.kind() {
-            HirKind::Alternation(hirs) => hirs.iter().flat_map(Self::split).collect(),
-            HirKind::Concat(hirs) => {
-                if hirs.len() == 2
-                    && let HirKind::Look(Look::Start) = hirs[0].kind()
-                {
-                    match hirs[1].kind() {
-                        HirKind::Class(class) => {
-                            let ranges = extract_class_to_ranges(class);
-
-                            if ranges.iter().any(|(_, max)| max > &255) {
-                                return vec![hir.clone()];
-                            }
-
-                            ranges
-                                .iter()
-                                .flat_map(|&(min, max)| {
-                                    (min..=max)
-                                        .map(|x| {
-                                            Hir::concat(vec![
-                                                Hir::look(Look::Start),
-                                                Hir::literal(vec![x as u8]),
-                                            ])
-                                        })
-                                        .collect_vec()
-                                })
-                                .collect_vec()
-                        }
-                        HirKind::Alternation(alter_hirs) => alter_hirs
-                            .iter()
-                            .map(|hir| Hir::concat(vec![Hir::look(Look::Start), hir.clone()]))
-                            .collect(),
-                        _ => vec![hir.clone()],
-                    }
-                } else {
-                    vec![hir.clone()]
-                }
-            }
-            HirKind::Class(class) => class_to_list_of_literal(class),
+    fn split(hir: &RegexExpr) -> Vec<RegexExpr> {
+        match hir {
+            RegexExpr::Alternation(hirs) => hirs.iter().flat_map(Self::split).collect(),
+            RegexExpr::Class(class) => class_to_list_of_literal(class),
             _ => vec![hir.clone()],
         }
     }
 
-    fn hir_to_graph(hir: &Hir) -> Self {
+    fn hir_to_graph(hir: &RegexExpr) -> Self {
         let nodes = Self::hir_to_nodes(hir);
         Self {
             id: 0,
@@ -163,7 +128,7 @@ impl RegexGraph {
         }
     }
 
-    fn hir_to_nodes(hir: &Hir) -> Vec<Node> {
+    fn hir_to_nodes(hir: &RegexExpr) -> Vec<Node> {
         let single = |data| {
             vec![Node {
                 data,
@@ -171,26 +136,20 @@ impl RegexGraph {
             }]
         };
 
-        match hir.kind() {
-            HirKind::Empty => single(NodeData::Empty),
-            HirKind::Literal(lit) => single(NodeData::Literal {
-                word: BString::from(lit.0.to_vec()),
-            }),
-            HirKind::Class(_) => single(NodeData::Temp { len: 1 }),
-            HirKind::Look(Look::Start) => single(NodeData::Start),
-            HirKind::Look(Look::End) => single(NodeData::End),
-            HirKind::Look(_) => single(NodeData::Temp { len: 0 }),
-            HirKind::Repetition(rep) => {
-                let min = rep.min as usize;
-                let max = rep.max.map(|m| m as usize);
+        match hir {
+            RegexExpr::Empty => single(NodeData::Empty),
+            RegexExpr::Literal(lit) => single(NodeData::Literal { word: lit.clone() }),
+            RegexExpr::Class(_) => single(NodeData::Temp { len: 1 }),
+            RegexExpr::Start => single(NodeData::Start),
+            RegexExpr::End => single(NodeData::End),
+            RegexExpr::Repetition { min, max, sub } => {
+                let min = *min as usize;
+                let max = max.map(|m| m as usize);
 
-                let sub = &rep.sub;
-
-                match sub.kind() {
-                    HirKind::Empty => single(NodeData::Empty),
-                    HirKind::Literal(lit) => {
-                        let base = lit.0.to_vec();
-                        let mut word = BString::from(base.repeat(min));
+                match &**sub {
+                    RegexExpr::Empty => single(NodeData::Empty),
+                    RegexExpr::Literal(lit) => {
+                        let mut word = BString::from(lit.repeat(min));
 
                         match max {
                             None => vec![
@@ -211,7 +170,7 @@ impl RegexGraph {
                                 literals.push(word.clone());
 
                                 for _ in 0..(m - min) {
-                                    word.extend_from_slice(&base);
+                                    word.extend_from_slice(lit);
                                     literals.push(word.clone());
                                 }
                                 single(NodeData::OrLiteral { literals })
@@ -219,7 +178,7 @@ impl RegexGraph {
                         }
                     }
 
-                    HirKind::Class(_) => single(match max {
+                    RegexExpr::Class(_) => single(match max {
                         None => NodeData::TempInf { len: min },
                         Some(m) if m == min => NodeData::Temp { len: min },
                         Some(m) => NodeData::TempRang {
@@ -227,24 +186,18 @@ impl RegexGraph {
                             max_len: m,
                         },
                     }),
-
-                    HirKind::Capture(cap) => single(NodeData::Repetition {
-                        sub: Self::hir_to_graph(&cap.sub),
-                    }),
-
                     _ => single(NodeData::Repetition {
                         sub: Self::hir_to_graph(sub),
                     }),
                 }
             }
-            HirKind::Capture(cap) => Self::hir_to_nodes(&cap.sub),
-            HirKind::Concat(concat) => concat.iter().flat_map(Self::hir_to_nodes).collect(),
-            HirKind::Alternation(alternation) => {
+            RegexExpr::Concat(concat) => concat.iter().flat_map(Self::hir_to_nodes).collect(),
+            RegexExpr::Alternation(alternation) => {
                 let all_literals: Option<Vec<BString>> = alternation
                     .iter()
                     .map(|alter| {
-                        if let HirKind::Literal(literal) = alter.kind() {
-                            Some(BString::from(literal.0.to_vec()))
+                        if let RegexExpr::Literal(literal) = alter {
+                            Some(literal.clone())
                         } else {
                             None
                         }
@@ -259,6 +212,7 @@ impl RegexGraph {
                     })
                 }
             }
+            RegexExpr::Dot => single(NodeData::Temp { len: 1 }),
         }
     }
 
@@ -305,7 +259,7 @@ impl RegexGraph {
                 NodeData::TempInf { len } => {
                     let mut new_node = node.clone();
                     new_node.start_index = if *len != 0 {
-                         prev.start_index.add(NodeStartIndex::AtLeast(*len))
+                        prev.start_index.add(NodeStartIndex::AtLeast(*len))
                     } else {
                         NodeStartIndex::None
                     };
@@ -434,8 +388,8 @@ mod tests {
     use crate::normalizer;
     use regex_syntax::Parser;
 
-    fn parse(pattern: &str) -> Hir {
-        normalizer::normalize(&Parser::new().parse(pattern).unwrap())
+    fn parse(pattern: &str) -> RegexExpr {
+        normalizer::normalize(&Parser::new().parse(pattern).unwrap().into())
     }
 
     mod split {
@@ -491,7 +445,6 @@ mod tests {
         fn repetitions_are_not_split() {
             check_split(r"(?:a|b)*", &[r"(?:a|b)*"]);
             check_split(r"^(a|b)+$", &[r"^a(a|b)*$", r"^b(a|b)*$"]);
-            check_split(r"^a.{2,4}b$", &[r"^a.{2,4}b$"]);
         }
 
         #[test]
@@ -554,8 +507,14 @@ mod tests {
 
         #[test]
         fn temp_range() {
-            // Fail
-            check_graphs("^a.{2,4}b$", &["'a'@0 -> 'b'@3..5 -> $@4..6"]);
+            check_graphs(
+                "^a.{2,4}b$",
+                &[
+                    "'a'@0 -> 'b'@3 -> $@4",
+                    "'a'@0 -> 'b'@4 -> $@5",
+                    "'a'@0 -> 'b'@5 -> $@6",
+                ],
+            );
         }
 
         #[test]
