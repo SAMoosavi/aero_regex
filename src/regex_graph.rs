@@ -93,7 +93,6 @@ pub(crate) struct Node {
 
 #[derive(Debug, Clone)]
 pub(crate) struct RegexGraph {
-    id: usize,
     regex_index: RegexIndex,
     nodes: Vec<Node>,
 }
@@ -122,7 +121,6 @@ impl RegexGraph {
     fn hir_to_graph(hir: &RegexExpr) -> Self {
         let nodes = Self::hir_to_nodes(hir);
         Self {
-            id: 0,
             regex_index: 0,
             nodes,
         }
@@ -311,7 +309,6 @@ impl RegexGraph {
         new_nodes.push(prev);
 
         Self {
-            id: 0,
             regex_index: 0,
             nodes: new_nodes,
         }
