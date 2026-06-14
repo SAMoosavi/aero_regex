@@ -304,7 +304,11 @@ impl RegexGraph {
                 }
                 NodeData::TempInf { len } => {
                     let mut new_node = node.clone();
-                    new_node.start_index = prev.start_index.add(NodeStartIndex::AtLeast(*len));
+                    new_node.start_index = if *len != 0 {
+                         prev.start_index.add(NodeStartIndex::AtLeast(*len))
+                    } else {
+                        NodeStartIndex::None
+                    };
                     prev = new_node;
                 }
                 NodeData::Empty => {
@@ -346,7 +350,7 @@ impl RegexGraph {
                         prev = new_node;
                     }
                 }
-                NodeData::OrGraph { graphs } => todo!(),
+                NodeData::OrGraph { graphs: _ } => todo!(),
             }
         }
 
@@ -556,8 +560,7 @@ mod tests {
 
         #[test]
         fn unbounded_temp() {
-            // Fail
-            check_graphs("^a.*b$", &["'a'@0 -> 'b'@0.. -> $@1.."]);
+            check_graphs("^a.*b$", &["'a'@0 -> 'b'@? -> $@1"]);
         }
 
         #[test]
