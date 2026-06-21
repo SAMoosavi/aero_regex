@@ -1,6 +1,6 @@
 use crate::{
     regex_expr::RegexExpr,
-    utilities::{RegexIndex, class_to_list_of_literal},
+    utilities::{RegexId, class_to_list_of_literal},
 };
 use bstr::BString;
 use std::fmt;
@@ -20,66 +20,60 @@ pub(crate) enum NodeData {
 }
 
 #[derive(Debug, Clone)]
-enum NodeStartIndex {
+pub(crate) enum NodeLen {
     None,
     Index(usize),
     Range { min: usize, max: usize },
     AtLeast(usize),
 }
 
-impl NodeStartIndex {
-    pub(self) fn add(&self, other: NodeStartIndex) -> NodeStartIndex {
+impl NodeLen {
+    pub(self) fn add(&self, other: NodeLen) -> NodeLen {
         match (self, other) {
-            (NodeStartIndex::None, other) => other,
-            (_, NodeStartIndex::None) => NodeStartIndex::None,
-            (NodeStartIndex::Index(a), NodeStartIndex::Index(b)) => NodeStartIndex::Index(a + b),
+            (NodeLen::None, other) => other,
+            (_, NodeLen::None) => NodeLen::None,
+            (NodeLen::Index(a), NodeLen::Index(b)) => NodeLen::Index(a + b),
             (
-                NodeStartIndex::Range {
+                NodeLen::Range {
                     min: a_min,
                     max: a_max,
                 },
-                NodeStartIndex::Range {
+                NodeLen::Range {
                     min: b_min,
                     max: b_max,
                 },
-            ) => NodeStartIndex::Range {
+            ) => NodeLen::Range {
                 min: a_min + b_min,
                 max: a_max + b_max,
             },
-            (NodeStartIndex::AtLeast(a), NodeStartIndex::AtLeast(b)) => {
-                NodeStartIndex::AtLeast(a + b)
-            }
-            (NodeStartIndex::Index(a), NodeStartIndex::AtLeast(b)) => {
-                NodeStartIndex::AtLeast(a + b)
-            }
-            (NodeStartIndex::Range { min: a_min, max: _ }, NodeStartIndex::AtLeast(b)) => {
-                NodeStartIndex::AtLeast(a_min + b)
+            (NodeLen::AtLeast(a), NodeLen::AtLeast(b)) => NodeLen::AtLeast(a + b),
+            (NodeLen::Index(a), NodeLen::AtLeast(b)) => NodeLen::AtLeast(a + b),
+            (NodeLen::Range { min: a_min, max: _ }, NodeLen::AtLeast(b)) => {
+                NodeLen::AtLeast(a_min + b)
             }
             (
-                NodeStartIndex::Range {
+                NodeLen::Range {
                     min: a_min,
                     max: a_max,
                 },
-                NodeStartIndex::Index(b),
-            ) => NodeStartIndex::Range {
+                NodeLen::Index(b),
+            ) => NodeLen::Range {
                 min: a_min + b,
                 max: a_max + b,
             },
             (
-                NodeStartIndex::Index(a),
-                NodeStartIndex::Range {
+                NodeLen::Index(a),
+                NodeLen::Range {
                     min: b_min,
                     max: b_max,
                 },
-            ) => NodeStartIndex::Range {
+            ) => NodeLen::Range {
                 min: a + b_min,
                 max: a + b_max,
             },
-            (NodeStartIndex::AtLeast(a), NodeStartIndex::Index(b)) => {
-                NodeStartIndex::AtLeast(a + b)
-            }
-            (NodeStartIndex::AtLeast(a), NodeStartIndex::Range { min: b_min, max: _ }) => {
-                NodeStartIndex::AtLeast(a + b_min)
+            (NodeLen::AtLeast(a), NodeLen::Index(b)) => NodeLen::AtLeast(a + b),
+            (NodeLen::AtLeast(a), NodeLen::Range { min: b_min, max: _ }) => {
+                NodeLen::AtLeast(a + b_min)
             }
         }
     }
@@ -87,24 +81,31 @@ impl NodeStartIndex {
 
 #[derive(Debug, Clone)]
 pub(crate) struct Node {
-    data: NodeData,
-    start_index: NodeStartIndex,
+    id: usize,
+    pub data: NodeData,
+    pub len: NodeLen,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct RegexGraph {
-    regex_index: RegexIndex,
-    nodes: Vec<Node>,
+    id: usize,
+    regex_id: RegexId,
+    pub(crate) nodes: Vec<Node>,
 }
 
 impl RegexGraph {
-    pub(crate) fn new(hir: &RegexExpr, regex_index: RegexIndex) -> Vec<Self> {
+    pub(crate) fn new(hir: &RegexExpr, regex_id: RegexId) -> Vec<Self> {
         let hirs = Self::split(hir);
         hirs.iter()
             .map(Self::hir_to_graph)
             .map(Self::optimize_nodes)
             .map(|mut graph| {
-                graph.regex_index = regex_index;
+                graph.regex_id = regex_id;
+                graph
+                    .nodes
+                    .iter_mut()
+                    .enumerate()
+                    .for_each(|(index, node)| node.id = index);
                 graph
             })
             .collect()
@@ -121,7 +122,8 @@ impl RegexGraph {
     fn hir_to_graph(hir: &RegexExpr) -> Self {
         let nodes = Self::hir_to_nodes(hir);
         Self {
-            regex_index: 0,
+            id: 0,
+            regex_id: 0,
             nodes,
         }
     }
@@ -129,8 +131,9 @@ impl RegexGraph {
     fn hir_to_nodes(hir: &RegexExpr) -> Vec<Node> {
         let single = |data| {
             vec![Node {
+                id: 0,
                 data,
-                start_index: NodeStartIndex::None,
+                len: NodeLen::None,
             }]
         };
 
@@ -152,14 +155,16 @@ impl RegexGraph {
                         match max {
                             None => vec![
                                 Node {
+                                    id: 0,
                                     data: NodeData::Literal { word },
-                                    start_index: NodeStartIndex::None,
+                                    len: NodeLen::None,
                                 },
                                 Node {
+                                    id: 0,
                                     data: NodeData::Repetition {
                                         sub: Self::hir_to_graph(sub),
                                     },
-                                    start_index: NodeStartIndex::None,
+                                    len: NodeLen::None,
                                 },
                             ],
                             Some(m) if m == min => single(NodeData::Literal { word }),
@@ -220,103 +225,107 @@ impl RegexGraph {
             return base;
         }
 
-        let mut new_nodes = Vec::with_capacity(nodes.len());
         let mut prev = nodes.first().unwrap().clone();
         let tail = &nodes[1..];
+        let mut nodes = Vec::with_capacity(nodes.len());
 
         for node in tail {
-            match &prev.data {
-                NodeData::Start => {
-                    let mut new_node = node.clone();
-                    if !matches!(prev.start_index, NodeStartIndex::None) {
-                        unreachable!("Start node should not have a length index");
-                    }
-                    new_node.start_index = NodeStartIndex::Index(0);
-                    prev = new_node;
+            match (&prev.data, &node.data) {
+                (NodeData::Temp { len: l_len }, NodeData::Temp { len: r_len }) => {
+                    prev.data = NodeData::Temp { len: l_len + r_len }
                 }
-                NodeData::End => unreachable!(),
-                NodeData::Literal { word } => {
-                    let mut new_node = node.clone();
-                    new_node.start_index = prev.start_index.add(NodeStartIndex::Index(word.len()));
-                    new_nodes.push(prev);
-                    prev = new_node;
+                (NodeData::Temp { len: l_len }, NodeData::TempInf { len: r_len })
+                | (NodeData::TempRang { min_len: l_len, .. }, NodeData::TempInf { len: r_len })
+                | (NodeData::TempInf { len: l_len }, NodeData::TempRang { min_len: r_len, .. })
+                | (NodeData::TempInf { len: l_len }, NodeData::TempInf { len: r_len })
+                | (NodeData::TempInf { len: l_len }, NodeData::Temp { len: r_len }) => {
+                    prev.data = NodeData::TempInf { len: l_len + r_len }
                 }
-                NodeData::Temp { len } => {
-                    let mut new_node = node.clone();
-                    new_node.start_index = prev.start_index.add(NodeStartIndex::Index(*len));
-                    prev = new_node;
-                }
-                NodeData::TempRang { min_len, max_len } => {
-                    let mut new_node = node.clone();
-                    new_node.start_index = prev.start_index.add(NodeStartIndex::Range {
-                        min: *min_len,
-                        max: *max_len,
-                    });
-                    prev = new_node;
-                }
-                NodeData::TempInf { len } => {
-                    let mut new_node = node.clone();
-                    new_node.start_index = if *len != 0 {
-                        prev.start_index.add(NodeStartIndex::AtLeast(*len))
-                    } else {
-                        NodeStartIndex::None
-                    };
-                    prev = new_node;
-                }
-                NodeData::Empty => {
-                    let mut new_node = node.clone();
-                    new_node.start_index = prev.start_index.add(NodeStartIndex::Index(0));
-                    prev = new_node;
-                }
-                NodeData::OrLiteral { literals } => {
-                    let mut new_node = node.clone();
-                    let max = literals.iter().map(|lit| lit.len()).max().unwrap_or(0);
-                    let min = literals.iter().map(|lit| lit.len()).min().unwrap_or(0);
-                    new_node.start_index = prev.start_index.add(NodeStartIndex::Range { min, max });
-                    new_nodes.push(prev);
-                    prev = new_node;
-                }
-                NodeData::Repetition { sub } => {
-                    let optimized_sub = Self::optimize_nodes(sub.clone());
-                    if optimized_sub.nodes.len() == 1 {
-                        let single_node = &optimized_sub.nodes[0];
-                        match single_node.data {
-                            NodeData::Temp { .. }
-                            | NodeData::TempRang { .. }
-                            | NodeData::TempInf { .. }
-                            | NodeData::Empty => prev = node.clone(),
-                            NodeData::End | NodeData::Start => unreachable!(),
-                            _ => {
-                                let mut new_node = node.clone();
-                                new_node.data = NodeData::Repetition { sub: optimized_sub };
-                                new_node.start_index = NodeStartIndex::None;
-                                new_nodes.push(prev);
-                                prev = new_node;
-                            }
-                        }
-                    } else {
-                        let mut new_node = node.clone();
-                        new_node.data = NodeData::Repetition { sub: optimized_sub };
-                        new_node.start_index = NodeStartIndex::None;
-                        new_nodes.push(prev);
-                        prev = new_node;
+                (NodeData::Temp { len }, NodeData::TempRang { min_len, max_len })
+                | (NodeData::TempRang { min_len, max_len }, NodeData::Temp { len }) => {
+                    prev.data = NodeData::TempRang {
+                        min_len: min_len + len,
+                        max_len: max_len + len,
                     }
                 }
-                NodeData::OrGraph { graphs: _ } => todo!(),
+                (
+                    NodeData::TempRang {
+                        min_len: l_min_len,
+                        max_len: l_max_len,
+                    },
+                    NodeData::TempRang {
+                        min_len: r_min_len,
+                        max_len: r_max_len,
+                    },
+                ) => {
+                    prev.data = NodeData::TempRang {
+                        min_len: l_min_len + r_min_len,
+                        max_len: l_max_len + r_max_len,
+                    }
+                }
+                (_, _) => {
+                    nodes.push(prev);
+                    prev = node.clone();
+                }
             }
         }
 
-        new_nodes.push(prev);
+        nodes.push(prev);
+
+        nodes.iter_mut().for_each(|node| {
+            node.len = match &node.data {
+                NodeData::End | NodeData::Start => NodeLen::Index(0),
+                NodeData::Literal { word } => NodeLen::Index(word.len()),
+                NodeData::Temp { len } => NodeLen::Index(*len),
+                NodeData::TempRang { min_len, max_len } => NodeLen::Range {
+                    min: *min_len,
+                    max: *max_len,
+                },
+                NodeData::TempInf { len: 0 } => NodeLen::None,
+                NodeData::TempInf { len } => NodeLen::AtLeast(*len),
+                NodeData::Empty => NodeLen::Index(0),
+                NodeData::OrLiteral { literals } => NodeLen::Range {
+                    min: literals.iter().map(|word| word.len()).min().unwrap(),
+                    max: literals.iter().map(|word| word.len()).max().unwrap(),
+                },
+                NodeData::Repetition { .. } => NodeLen::None,
+                NodeData::OrGraph { graphs: _ } => todo!(),
+            }
+        });
 
         Self {
-            regex_index: 0,
-            nodes: new_nodes,
+            id: 0,
+            regex_id: 0,
+            nodes,
         }
+    }
+
+    /// Extracts all exact literal match strings paired with their corresponding node IDs.
+    pub(crate) fn words(&self) -> Vec<(BString, usize)> {
+        let mut result = Vec::new();
+        for (node_id, node) in self.nodes.iter().enumerate() {
+            match &node.data {
+                NodeData::Literal { word } => {
+                    result.push((word.clone(), node_id));
+                }
+                NodeData::OrLiteral { literals } => {
+                    for lit in literals {
+                        result.push((lit.clone(), node_id));
+                    }
+                }
+                _ => {}
+            }
+        }
+        result
+    }
+
+    pub(crate) fn nodes(&self, start_node_id: usize, end_node_id: usize) -> &[Node] {
+        &self.nodes[start_node_id..=end_node_id]
     }
 }
 
 impl fmt::Display for RegexGraph {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let graph = self
             .nodes
             .iter()
@@ -329,7 +338,7 @@ impl fmt::Display for RegexGraph {
 
 impl fmt::Display for Node {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}@{}", self.data, self.start_index)
+        write!(f, "{}@{}", self.data, self.len)
     }
 }
 
@@ -366,13 +375,13 @@ impl fmt::Display for NodeData {
     }
 }
 
-impl fmt::Display for NodeStartIndex {
+impl fmt::Display for NodeLen {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let idx_str = match &self {
-            NodeStartIndex::None => "?".to_string(),
-            NodeStartIndex::Index(i) => i.to_string(),
-            NodeStartIndex::Range { min, max } => format!("{min}..{max}"),
-            NodeStartIndex::AtLeast(i) => format!("{i}.."),
+            NodeLen::None => "?".to_string(),
+            NodeLen::Index(i) => i.to_string(),
+            NodeLen::Range { min, max } => format!("{min}..{max}"),
+            NodeLen::AtLeast(i) => format!("{i}.."),
         };
 
         write!(f, "{idx_str}")
@@ -479,27 +488,27 @@ mod tests {
 
         #[test]
         fn simple_literal() {
-            check_graphs("abc", &["'abc'@?"]);
+            check_graphs("abc", &["'abc'@3"]);
         }
 
         #[test]
         fn start_anchor() {
-            check_graphs("^abc", &["'abc'@0"]);
+            check_graphs("^abc", &["^@0 -> 'abc'@3"]);
         }
 
         #[test]
         fn end_anchor() {
-            check_graphs("abc$", &["'abc'@? -> $@3"]);
+            check_graphs("abc$", &["'abc'@3 -> $@0"]);
         }
 
         #[test]
         fn both_anchors() {
-            check_graphs("^abc$", &["'abc'@0 -> $@3"]);
+            check_graphs("^abc$", &["^@0 -> 'abc'@3 -> $@0"]);
         }
 
         #[test]
         fn temp_skip() {
-            check_graphs("^a.b$", &["'a'@0 -> 'b'@2 -> $@3"]);
+            check_graphs("^a.b$", &["^@0 -> 'a'@1 -> .{1}@1 -> 'b'@1 -> $@0"]);
         }
 
         #[test]
@@ -507,260 +516,111 @@ mod tests {
             check_graphs(
                 "^a.{2,4}b$",
                 &[
-                    "'a'@0 -> 'b'@3 -> $@4",
-                    "'a'@0 -> 'b'@4 -> $@5",
-                    "'a'@0 -> 'b'@5 -> $@6",
+                    "^@0 -> 'a'@1 -> .{2}@2 -> 'b'@1 -> $@0",
+                    "^@0 -> 'a'@1 -> .{3}@3 -> 'b'@1 -> $@0",
+                    "^@0 -> 'a'@1 -> .{4}@4 -> 'b'@1 -> $@0",
                 ],
             );
         }
 
         #[test]
         fn unbounded_temp() {
-            check_graphs("^a.*b$", &["'a'@0 -> 'b'@? -> $@1"]);
+            check_graphs(
+                "^a.*b$",
+                &["^@0 -> 'a'@1 -> REP([.{1}@?] )@? -> 'b'@1 -> $@0"],
+            );
         }
 
         #[test]
         fn alternation_split() {
-            check_graphs("^(a|b)c$", &["'ac'@0 -> $@2", "'bc'@0 -> $@2"]);
+            check_graphs(
+                "^(a|b)c$",
+                &["^@0 -> 'ac'@2 -> $@0", "^@0 -> 'bc'@2 -> $@0"],
+            );
         }
 
         #[test]
         fn or_literal() {
-            check_graphs("a|b", &["'a'@?", "'b'@?"]);
+            check_graphs("a|b", &["'a'@1", "'b'@1"]);
         }
 
         #[test]
         fn repetition_with_or() {
-            check_graphs("^(a|b)*c$", &["'c'@? -> $@1"]);
+            check_graphs("^(a|b)*c$", &["^@0 -> .{0, }@? -> 'c'@1 -> $@0"]);
+        }
+    }
+
+    mod words {
+        use super::*;
+
+        fn check_words(input: &str, expected: &[(&str, usize)]) {
+            let input_hir = parse(input);
+            let graphs = RegexGraph::new(&input_hir, 0);
+            let actual: Vec<(String, usize)> = graphs
+                .iter()
+                .flat_map(|g| g.words())
+                .map(|(w, id)| (String::from_utf8_lossy(&w).to_string(), id))
+                .collect();
+            let expected_owned: Vec<(String, usize)> = expected
+                .iter()
+                .map(|(s, id)| (s.to_string(), *id))
+                .collect();
+            assert_eq!(actual, expected_owned);
         }
 
         #[test]
-        fn complex_real_world() {
-            check_graphs(
-                "^(?:a|b)[0-9]{1,2}.{10}test$",
-                &[
-                    "'a0'@0 -> 'test'@12 -> $@16",
-                    "'a1'@0 -> 'test'@12 -> $@16",
-                    "'a2'@0 -> 'test'@12 -> $@16",
-                    "'a3'@0 -> 'test'@12 -> $@16",
-                    "'a4'@0 -> 'test'@12 -> $@16",
-                    "'a5'@0 -> 'test'@12 -> $@16",
-                    "'a6'@0 -> 'test'@12 -> $@16",
-                    "'a7'@0 -> 'test'@12 -> $@16",
-                    "'a8'@0 -> 'test'@12 -> $@16",
-                    "'a9'@0 -> 'test'@12 -> $@16",
-                    "'a00'@0 -> 'test'@13 -> $@17",
-                    "'a01'@0 -> 'test'@13 -> $@17",
-                    "'a02'@0 -> 'test'@13 -> $@17",
-                    "'a03'@0 -> 'test'@13 -> $@17",
-                    "'a04'@0 -> 'test'@13 -> $@17",
-                    "'a05'@0 -> 'test'@13 -> $@17",
-                    "'a06'@0 -> 'test'@13 -> $@17",
-                    "'a07'@0 -> 'test'@13 -> $@17",
-                    "'a08'@0 -> 'test'@13 -> $@17",
-                    "'a09'@0 -> 'test'@13 -> $@17",
-                    "'a10'@0 -> 'test'@13 -> $@17",
-                    "'a11'@0 -> 'test'@13 -> $@17",
-                    "'a12'@0 -> 'test'@13 -> $@17",
-                    "'a13'@0 -> 'test'@13 -> $@17",
-                    "'a14'@0 -> 'test'@13 -> $@17",
-                    "'a15'@0 -> 'test'@13 -> $@17",
-                    "'a16'@0 -> 'test'@13 -> $@17",
-                    "'a17'@0 -> 'test'@13 -> $@17",
-                    "'a18'@0 -> 'test'@13 -> $@17",
-                    "'a19'@0 -> 'test'@13 -> $@17",
-                    "'a20'@0 -> 'test'@13 -> $@17",
-                    "'a21'@0 -> 'test'@13 -> $@17",
-                    "'a22'@0 -> 'test'@13 -> $@17",
-                    "'a23'@0 -> 'test'@13 -> $@17",
-                    "'a24'@0 -> 'test'@13 -> $@17",
-                    "'a25'@0 -> 'test'@13 -> $@17",
-                    "'a26'@0 -> 'test'@13 -> $@17",
-                    "'a27'@0 -> 'test'@13 -> $@17",
-                    "'a28'@0 -> 'test'@13 -> $@17",
-                    "'a29'@0 -> 'test'@13 -> $@17",
-                    "'a30'@0 -> 'test'@13 -> $@17",
-                    "'a31'@0 -> 'test'@13 -> $@17",
-                    "'a32'@0 -> 'test'@13 -> $@17",
-                    "'a33'@0 -> 'test'@13 -> $@17",
-                    "'a34'@0 -> 'test'@13 -> $@17",
-                    "'a35'@0 -> 'test'@13 -> $@17",
-                    "'a36'@0 -> 'test'@13 -> $@17",
-                    "'a37'@0 -> 'test'@13 -> $@17",
-                    "'a38'@0 -> 'test'@13 -> $@17",
-                    "'a39'@0 -> 'test'@13 -> $@17",
-                    "'a40'@0 -> 'test'@13 -> $@17",
-                    "'a41'@0 -> 'test'@13 -> $@17",
-                    "'a42'@0 -> 'test'@13 -> $@17",
-                    "'a43'@0 -> 'test'@13 -> $@17",
-                    "'a44'@0 -> 'test'@13 -> $@17",
-                    "'a45'@0 -> 'test'@13 -> $@17",
-                    "'a46'@0 -> 'test'@13 -> $@17",
-                    "'a47'@0 -> 'test'@13 -> $@17",
-                    "'a48'@0 -> 'test'@13 -> $@17",
-                    "'a49'@0 -> 'test'@13 -> $@17",
-                    "'a50'@0 -> 'test'@13 -> $@17",
-                    "'a51'@0 -> 'test'@13 -> $@17",
-                    "'a52'@0 -> 'test'@13 -> $@17",
-                    "'a53'@0 -> 'test'@13 -> $@17",
-                    "'a54'@0 -> 'test'@13 -> $@17",
-                    "'a55'@0 -> 'test'@13 -> $@17",
-                    "'a56'@0 -> 'test'@13 -> $@17",
-                    "'a57'@0 -> 'test'@13 -> $@17",
-                    "'a58'@0 -> 'test'@13 -> $@17",
-                    "'a59'@0 -> 'test'@13 -> $@17",
-                    "'a60'@0 -> 'test'@13 -> $@17",
-                    "'a61'@0 -> 'test'@13 -> $@17",
-                    "'a62'@0 -> 'test'@13 -> $@17",
-                    "'a63'@0 -> 'test'@13 -> $@17",
-                    "'a64'@0 -> 'test'@13 -> $@17",
-                    "'a65'@0 -> 'test'@13 -> $@17",
-                    "'a66'@0 -> 'test'@13 -> $@17",
-                    "'a67'@0 -> 'test'@13 -> $@17",
-                    "'a68'@0 -> 'test'@13 -> $@17",
-                    "'a69'@0 -> 'test'@13 -> $@17",
-                    "'a70'@0 -> 'test'@13 -> $@17",
-                    "'a71'@0 -> 'test'@13 -> $@17",
-                    "'a72'@0 -> 'test'@13 -> $@17",
-                    "'a73'@0 -> 'test'@13 -> $@17",
-                    "'a74'@0 -> 'test'@13 -> $@17",
-                    "'a75'@0 -> 'test'@13 -> $@17",
-                    "'a76'@0 -> 'test'@13 -> $@17",
-                    "'a77'@0 -> 'test'@13 -> $@17",
-                    "'a78'@0 -> 'test'@13 -> $@17",
-                    "'a79'@0 -> 'test'@13 -> $@17",
-                    "'a80'@0 -> 'test'@13 -> $@17",
-                    "'a81'@0 -> 'test'@13 -> $@17",
-                    "'a82'@0 -> 'test'@13 -> $@17",
-                    "'a83'@0 -> 'test'@13 -> $@17",
-                    "'a84'@0 -> 'test'@13 -> $@17",
-                    "'a85'@0 -> 'test'@13 -> $@17",
-                    "'a86'@0 -> 'test'@13 -> $@17",
-                    "'a87'@0 -> 'test'@13 -> $@17",
-                    "'a88'@0 -> 'test'@13 -> $@17",
-                    "'a89'@0 -> 'test'@13 -> $@17",
-                    "'a90'@0 -> 'test'@13 -> $@17",
-                    "'a91'@0 -> 'test'@13 -> $@17",
-                    "'a92'@0 -> 'test'@13 -> $@17",
-                    "'a93'@0 -> 'test'@13 -> $@17",
-                    "'a94'@0 -> 'test'@13 -> $@17",
-                    "'a95'@0 -> 'test'@13 -> $@17",
-                    "'a96'@0 -> 'test'@13 -> $@17",
-                    "'a97'@0 -> 'test'@13 -> $@17",
-                    "'a98'@0 -> 'test'@13 -> $@17",
-                    "'a99'@0 -> 'test'@13 -> $@17",
-                    "'b0'@0 -> 'test'@12 -> $@16",
-                    "'b1'@0 -> 'test'@12 -> $@16",
-                    "'b2'@0 -> 'test'@12 -> $@16",
-                    "'b3'@0 -> 'test'@12 -> $@16",
-                    "'b4'@0 -> 'test'@12 -> $@16",
-                    "'b5'@0 -> 'test'@12 -> $@16",
-                    "'b6'@0 -> 'test'@12 -> $@16",
-                    "'b7'@0 -> 'test'@12 -> $@16",
-                    "'b8'@0 -> 'test'@12 -> $@16",
-                    "'b9'@0 -> 'test'@12 -> $@16",
-                    "'b00'@0 -> 'test'@13 -> $@17",
-                    "'b01'@0 -> 'test'@13 -> $@17",
-                    "'b02'@0 -> 'test'@13 -> $@17",
-                    "'b03'@0 -> 'test'@13 -> $@17",
-                    "'b04'@0 -> 'test'@13 -> $@17",
-                    "'b05'@0 -> 'test'@13 -> $@17",
-                    "'b06'@0 -> 'test'@13 -> $@17",
-                    "'b07'@0 -> 'test'@13 -> $@17",
-                    "'b08'@0 -> 'test'@13 -> $@17",
-                    "'b09'@0 -> 'test'@13 -> $@17",
-                    "'b10'@0 -> 'test'@13 -> $@17",
-                    "'b11'@0 -> 'test'@13 -> $@17",
-                    "'b12'@0 -> 'test'@13 -> $@17",
-                    "'b13'@0 -> 'test'@13 -> $@17",
-                    "'b14'@0 -> 'test'@13 -> $@17",
-                    "'b15'@0 -> 'test'@13 -> $@17",
-                    "'b16'@0 -> 'test'@13 -> $@17",
-                    "'b17'@0 -> 'test'@13 -> $@17",
-                    "'b18'@0 -> 'test'@13 -> $@17",
-                    "'b19'@0 -> 'test'@13 -> $@17",
-                    "'b20'@0 -> 'test'@13 -> $@17",
-                    "'b21'@0 -> 'test'@13 -> $@17",
-                    "'b22'@0 -> 'test'@13 -> $@17",
-                    "'b23'@0 -> 'test'@13 -> $@17",
-                    "'b24'@0 -> 'test'@13 -> $@17",
-                    "'b25'@0 -> 'test'@13 -> $@17",
-                    "'b26'@0 -> 'test'@13 -> $@17",
-                    "'b27'@0 -> 'test'@13 -> $@17",
-                    "'b28'@0 -> 'test'@13 -> $@17",
-                    "'b29'@0 -> 'test'@13 -> $@17",
-                    "'b30'@0 -> 'test'@13 -> $@17",
-                    "'b31'@0 -> 'test'@13 -> $@17",
-                    "'b32'@0 -> 'test'@13 -> $@17",
-                    "'b33'@0 -> 'test'@13 -> $@17",
-                    "'b34'@0 -> 'test'@13 -> $@17",
-                    "'b35'@0 -> 'test'@13 -> $@17",
-                    "'b36'@0 -> 'test'@13 -> $@17",
-                    "'b37'@0 -> 'test'@13 -> $@17",
-                    "'b38'@0 -> 'test'@13 -> $@17",
-                    "'b39'@0 -> 'test'@13 -> $@17",
-                    "'b40'@0 -> 'test'@13 -> $@17",
-                    "'b41'@0 -> 'test'@13 -> $@17",
-                    "'b42'@0 -> 'test'@13 -> $@17",
-                    "'b43'@0 -> 'test'@13 -> $@17",
-                    "'b44'@0 -> 'test'@13 -> $@17",
-                    "'b45'@0 -> 'test'@13 -> $@17",
-                    "'b46'@0 -> 'test'@13 -> $@17",
-                    "'b47'@0 -> 'test'@13 -> $@17",
-                    "'b48'@0 -> 'test'@13 -> $@17",
-                    "'b49'@0 -> 'test'@13 -> $@17",
-                    "'b50'@0 -> 'test'@13 -> $@17",
-                    "'b51'@0 -> 'test'@13 -> $@17",
-                    "'b52'@0 -> 'test'@13 -> $@17",
-                    "'b53'@0 -> 'test'@13 -> $@17",
-                    "'b54'@0 -> 'test'@13 -> $@17",
-                    "'b55'@0 -> 'test'@13 -> $@17",
-                    "'b56'@0 -> 'test'@13 -> $@17",
-                    "'b57'@0 -> 'test'@13 -> $@17",
-                    "'b58'@0 -> 'test'@13 -> $@17",
-                    "'b59'@0 -> 'test'@13 -> $@17",
-                    "'b60'@0 -> 'test'@13 -> $@17",
-                    "'b61'@0 -> 'test'@13 -> $@17",
-                    "'b62'@0 -> 'test'@13 -> $@17",
-                    "'b63'@0 -> 'test'@13 -> $@17",
-                    "'b64'@0 -> 'test'@13 -> $@17",
-                    "'b65'@0 -> 'test'@13 -> $@17",
-                    "'b66'@0 -> 'test'@13 -> $@17",
-                    "'b67'@0 -> 'test'@13 -> $@17",
-                    "'b68'@0 -> 'test'@13 -> $@17",
-                    "'b69'@0 -> 'test'@13 -> $@17",
-                    "'b70'@0 -> 'test'@13 -> $@17",
-                    "'b71'@0 -> 'test'@13 -> $@17",
-                    "'b72'@0 -> 'test'@13 -> $@17",
-                    "'b73'@0 -> 'test'@13 -> $@17",
-                    "'b74'@0 -> 'test'@13 -> $@17",
-                    "'b75'@0 -> 'test'@13 -> $@17",
-                    "'b76'@0 -> 'test'@13 -> $@17",
-                    "'b77'@0 -> 'test'@13 -> $@17",
-                    "'b78'@0 -> 'test'@13 -> $@17",
-                    "'b79'@0 -> 'test'@13 -> $@17",
-                    "'b80'@0 -> 'test'@13 -> $@17",
-                    "'b81'@0 -> 'test'@13 -> $@17",
-                    "'b82'@0 -> 'test'@13 -> $@17",
-                    "'b83'@0 -> 'test'@13 -> $@17",
-                    "'b84'@0 -> 'test'@13 -> $@17",
-                    "'b85'@0 -> 'test'@13 -> $@17",
-                    "'b86'@0 -> 'test'@13 -> $@17",
-                    "'b87'@0 -> 'test'@13 -> $@17",
-                    "'b88'@0 -> 'test'@13 -> $@17",
-                    "'b89'@0 -> 'test'@13 -> $@17",
-                    "'b90'@0 -> 'test'@13 -> $@17",
-                    "'b91'@0 -> 'test'@13 -> $@17",
-                    "'b92'@0 -> 'test'@13 -> $@17",
-                    "'b93'@0 -> 'test'@13 -> $@17",
-                    "'b94'@0 -> 'test'@13 -> $@17",
-                    "'b95'@0 -> 'test'@13 -> $@17",
-                    "'b96'@0 -> 'test'@13 -> $@17",
-                    "'b97'@0 -> 'test'@13 -> $@17",
-                    "'b98'@0 -> 'test'@13 -> $@17",
-                    "'b99'@0 -> 'test'@13 -> $@17",
-                ],
-            );
+        fn simple_literal() {
+            check_words("abc", &[("abc", 0)]);
+        }
+
+        #[test]
+        fn alternation_literals() {
+            check_words("a|b", &[("a", 0), ("b", 0)]);
+        }
+
+        #[test]
+        fn literal_with_start_anchor() {
+            check_words("^abc", &[("abc", 1)]);
+        }
+
+        #[test]
+        fn literal_with_end_anchor() {
+            check_words("abc$", &[("abc", 0)]);
+        }
+
+        #[test]
+        fn concat_literals() {
+            check_words("^ac$", &[("ac", 1)]);
+        }
+
+        #[test]
+        fn alternation_in_concat() {
+            check_words("^(a|b)c$", &[("ac", 1), ("bc", 1)]);
+        }
+
+        #[test]
+        fn repetition_exact_literal() {
+            check_words("^(?:a){2}$", &[("aa", 1)]);
+        }
+
+        #[test]
+        fn repetition_range_literal() {
+            check_words("^(?:a){1,3}$", &[("a", 1), ("aa", 1), ("aaa", 1)]);
+        }
+
+        #[test]
+        fn no_literals_only_temp_nodes() {
+            check_words("^.{2}$", &[]);
+        }
+
+        #[test]
+        fn empty_graph() {
+            check_words("", &[]);
+        }
+
+        #[test]
+        fn or_literal_in_concat() {
+            check_words("^(?:a|b)cd", &[("acd", 1), ("bcd", 1)]);
         }
     }
 }

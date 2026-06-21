@@ -2,7 +2,8 @@ use itertools::Itertools;
 
 use crate::regex_expr::RegexExpr;
 
-pub(crate) type RegexIndex = usize;
+pub(crate) type RegexId = usize;
+pub(crate) type RegexIdList = Vec<RegexId>;
 
 pub(crate) fn class_to_list_of_literal(ranges: &[(u32, u32)]) -> Vec<RegexExpr> {
     if ranges.iter().any(|(_, max)| max > &255) {

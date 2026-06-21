@@ -119,10 +119,9 @@ fn or_literal(regex: &RegexExpr) -> Vec<RegexExpr> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use regex_syntax::Parser;
 
     fn parse(pattern: &str) -> RegexExpr {
-        Parser::new().parse(pattern).unwrap().into()
+        RegexExpr::parse(pattern)
     }
 
     fn check(input: &str, expected: &str) {

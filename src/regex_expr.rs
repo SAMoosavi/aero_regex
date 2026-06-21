@@ -1,6 +1,9 @@
 use bstr::BString;
 use itertools::Itertools;
-use regex_syntax::hir::{Class, Hir, HirKind, Look};
+use regex_syntax::{
+    Parser,
+    hir::{Class, Hir, HirKind, Look},
+};
 use std::fmt;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -82,6 +85,10 @@ impl From<&HirKind> for RegexExpr {
 }
 
 impl RegexExpr {
+    pub(crate) fn parse(regex: &str) -> Self {
+        Parser::new().parse(regex).unwrap().into()
+    }
+
     pub(crate) fn concat(elements: &[Self]) -> Self {
         let mut result = Vec::new();
 
@@ -544,12 +551,10 @@ mod tests {
         #[test]
         fn deeply_nested_concat_flattened() {
             assert_eq!(
-                RegexExpr::concat(&[RegexExpr::Concat(vec![
-                    RegexExpr::Concat(vec![
-                        RegexExpr::Literal(BString::from(b"a".as_slice())),
-                        RegexExpr::Dot,
-                    ]),
-                ])]),
+                RegexExpr::concat(&[RegexExpr::Concat(vec![RegexExpr::Concat(vec![
+                    RegexExpr::Literal(BString::from(b"a".as_slice())),
+                    RegexExpr::Dot,
+                ]),])]),
                 RegexExpr::Concat(vec![
                     RegexExpr::Literal(BString::from(b"a".as_slice())),
                     RegexExpr::Dot,
