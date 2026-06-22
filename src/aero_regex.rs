@@ -22,7 +22,7 @@
 //! - `MatchNode` — a node in a graph with its matched position
 //! - `PosIndex` — position constraint (exact, at-least, or range)
 
-use crate::regex_graph::{Node, NodeData};
+use crate::regex_graph::{NodeData};
 use crate::{
     normalizer::normalize,
     regex_expr::RegexExpr,
@@ -37,8 +37,6 @@ use aho_corasick::{
 use bstr::BString;
 use itertools::Itertools;
 use std::collections::HashMap;
-use std::iter::Enumerate;
-use std::slice::Iter;
 
 #[derive(Debug)]
 enum PosIndex {
@@ -171,6 +169,7 @@ impl AeroRegex {
                         self.is_match(&last_node, graph_id, current_node_id, current_pos)
                     }
                     NodeData::Literal { .. } => current_node_id == node_index,
+                    NodeData::OrLiteral { .. } => current_node_id == node_index,
                     NodeData::Temp { len } => {
                         let last_node = Some(MatchNode {
                             node_id: node_index,
@@ -195,7 +194,6 @@ impl AeroRegex {
                     NodeData::Empty => unreachable!(),
                     NodeData::End => unreachable!(),
                     NodeData::Repetition { .. } => todo!(),
-                    NodeData::OrLiteral { .. } => todo!(),
                     NodeData::OrGraph { .. } => todo!(),
                 }
             }
@@ -209,13 +207,14 @@ impl AeroRegex {
 
                 match node.data {
                     NodeData::Start => unreachable!(),
-                    NodeData::End => unreachable!(),
                     NodeData::Literal { .. } => {
                         if current_node_id == *node_id {
-                            todo!()
-                            // node.len +
+                            pos.matched(current_pos)
+                        }else {
+                            false
                         }
                     }
+                    NodeData::End => todo!(),
                     NodeData::OrLiteral { .. } => todo!(),
                     NodeData::OrGraph { .. } => todo!(),
                     NodeData::Temp { .. } => todo!(),
@@ -224,7 +223,6 @@ impl AeroRegex {
                     NodeData::Empty => todo!(),
                     NodeData::Repetition { .. } => todo!(),
                 }
-                false
             }
         }
     }
