@@ -1,3 +1,32 @@
+//! # RegexExpr — Simplified Regex AST
+//!
+//! Provides a simplified representation of regular expressions, built on top
+//! of `regex_syntax`'s HIR (High-level Intermediate Representation). The key
+//! simplification: capture groups are erased, look-arounds are reduced to
+//! `Start`/`End`/`Empty`, and character classes with >20 codepoints collapse
+//! to `Dot`.
+//!
+//! ## Variants
+//!
+//! | Variant | Meaning |
+//! |---------|---------|
+//! | `Empty` | ε (empty string) |
+//! | `Dot` | Any single byte |
+//! | `Start` | `^` anchor |
+//! | `End` | `$` anchor |
+//! | `Literal(BString)` | Exact byte sequence |
+//! | `Class(Vec<(u32,u32)>)` | Character class as codepoint ranges |
+//! | `Repetition { min, max, sub }` | `sub{min,max}` |
+//! | `Concat(Vec<RegexExpr>)` | Sequence of expressions |
+//! | `Alternation(Vec<RegexExpr>)` | `expr1|expr2|...` |
+//!
+//! ## Construction helpers
+//!
+//! - `RegexExpr::concat(&[...])` — builds a Concat, merging adjacent literals
+//!   and flattening nested Concats.
+//! - `RegexExpr::alternation(&[...])` — builds an Alternation, flattening nested
+//!   ones and deduplicating.
+
 use bstr::BString;
 use itertools::Itertools;
 use regex_syntax::{

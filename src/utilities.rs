@@ -1,3 +1,7 @@
+//! # Utilities — Shared Types and Helpers
+//!
+//! Contains type aliases and small utility functions used across the crate.
+
 use itertools::Itertools;
 
 use crate::regex_expr::RegexExpr;

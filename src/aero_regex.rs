@@ -1,3 +1,27 @@
+//! # AeroRegex — Aho-Corasick + Graph Matching Engine
+//!
+//! The top-level matching engine that combines an Aho-Corasick DFA for fast
+//! multi-pattern literal scanning with node-graph constraint validation.
+//!
+//! ## How it works
+//!
+//! 1. **Build phase** (`AeroRegex::new`):
+//!    - Parse each regex → normalize → compile to `RegexGraph`s
+//!    - Extract all literal words from graphs
+//!    - Build an Aho-Corasick DFA from those words
+//!    - Map DFA pattern IDs back to graph/node pairs via `word_map`
+//!
+//! 2. **Match phase** (`feed_packet`):
+//!    - Stream input bytes through the Aho-Corasick DFA
+//!    - On each DFA match, look up which graphs/nodes are triggered
+//!    - Validate positional constraints via `is_match`
+//!
+//! ## Key types
+//!
+//! - `State` — streaming match state (Aho state + position + current nodes)
+//! - `MatchNode` — a node in a graph with its matched position
+//! - `PosIndex` — position constraint (exact, at-least, or range)
+
 use crate::regex_graph::{Node, NodeData};
 use crate::{
     normalizer::normalize,
@@ -177,7 +201,7 @@ impl AeroRegex {
             }
             Some(MatchNode { node_id, pos }) => {
                 let regex_graph = &self.graphs[graph_id];
-                let node = &regex_graph.nodes[node_id+1];
+                let node = &regex_graph.nodes[node_id + 1];
 
                 if current_node_id <= *node_id {
                     return false;

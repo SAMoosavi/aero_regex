@@ -1,3 +1,31 @@
+//! # RegexGraph — Compiled Node Graph
+//!
+//! Converts a normalized `RegexExpr` into a linear node graph suitable for
+//! matching. Each graph represents one "path" through the regex after
+//! alternations have been split.
+//!
+//! ## Node types
+//!
+//! | NodeData | Meaning |
+//! |----------|---------|
+//! | `Start` / `End` | Anchor constraints |
+//! | `Literal { word }` | Exact byte match |
+//! | `OrLiteral { literals }` | One of several literals (optimized) |
+//! | `OrGraph { graphs }` | Branching sub-graphs (unresolved alternation) |
+//! | `Temp { len }` | Fixed-width wildcard (e.g., `.{3}`) |
+//! | `TempRang { min, max }` | Variable-width wildcard (e.g., `.{2,5}`) |
+//! | `TempInf { len }` | Unbounded wildcard after fixed prefix |
+//! | `Repetition { sub }` | Recursive sub-graph for `*`/`+` patterns |
+//! | `Empty` | No-op |
+//!
+//! ## Compilation pipeline
+//!
+//! 1. `split()` — recursively decomposes alternations and classes into
+//!    independent paths
+//! 2. `hir_to_graph()` — converts each path's `RegexExpr` to a `Vec<Node>`
+//! 3. `optimize_nodes()` — merges adjacent compatible `Temp*` nodes and
+//!    computes `NodeLen` for each node
+
 use crate::{
     regex_expr::RegexExpr,
     utilities::{RegexId, class_to_list_of_literal},

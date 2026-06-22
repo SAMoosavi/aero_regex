@@ -1,3 +1,17 @@
+//! # Normalizer — AST Simplification Pass
+//!
+//! Transforms a `RegexExpr` AST into a canonical form optimized for graph
+//! compilation. Key transformations:
+//!
+//! 1. **Bounded repetitions** — `a{3}` → `aaa`, `a{2,4}` → `aa|aaa|aaaa`
+//! 2. **Unbounded repetitions** — `a+` → `aa*`, `a{2,}` → `aaa*`
+//! 3. **Optional elements** — `a?b` → `b|ab` (distribution over concat)
+//! 4. **Cartesian product** — `(a|b)(c|d)` → `ac|ad|bc|bd` (when product ≤5000)
+//! 5. **Anchor distribution** — `a(x|y)$` → `ax$|ay$`
+//!
+//! The product-size threshold (5000) prevents exponential blowup on patterns
+//! like `[a-z]{20}`.
+
 use crate::{regex_expr::RegexExpr, utilities::class_to_list_of_literal};
 use itertools::Itertools;
 
