@@ -117,7 +117,7 @@ pub(crate) struct Node {
 #[derive(Debug, Clone)]
 pub(crate) struct RegexGraph {
     id: usize,
-    regex_id: RegexId,
+    pub(crate) regex_id: RegexId,
     pub(crate) nodes: Vec<Node>,
 }
 

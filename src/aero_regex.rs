@@ -22,7 +22,7 @@
 //! - `MatchNode` — a node in a graph with its matched position
 //! - `PosIndex` — position constraint (exact, at-least, or range)
 
-use crate::regex_graph::{NodeData};
+use crate::regex_graph::NodeData;
 use crate::{
     normalizer::normalize,
     regex_expr::RegexExpr,
@@ -38,7 +38,7 @@ use bstr::BString;
 use itertools::Itertools;
 use std::collections::HashMap;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum PosIndex {
     Index(usize),
     AtLeast(usize),
@@ -55,20 +55,20 @@ impl PosIndex {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct MatchNode {
     node_id: usize,
     pos: PosIndex,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct State {
     current_nodes: Vec<Option<MatchNode>>,
     aho_state: StateID,
     pos: usize,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct WordIndex {
     graph_id: usize,
     node_id: usize,
@@ -136,16 +136,28 @@ impl AeroRegex {
 
                     let regex_graph = &self.graphs[graph_id];
 
-                    // let current_node = regex_graph.nodes(node_id);
-                    let a = self.is_match(last_node, graph_id, node_id, pos);
-
-                    // let last_node_id = last_node.node_id
-                    // prev_end + word_len == pos
+                    if self.is_match(last_node, graph_id, node_id, pos) {
+                        state.current_nodes[graph_id] = Some(MatchNode {
+                            node_id,
+                            pos: PosIndex::Index(pos),
+                        });
+                        if self.is_end_node(graph_id, node_id) {
+                            results.push(regex_graph.regex_id);
+                        }
+                    }
                 }
             }
         }
 
         results
+    }
+
+    pub(crate) fn start_state(&self) -> State {
+        State {
+            current_nodes: vec![None; self.graphs.len()],
+            pos: 0,
+            aho_state: self.aho.start_state(Anchored::No).unwrap(),
+        }
     }
 
     fn is_match(
@@ -198,19 +210,20 @@ impl AeroRegex {
                 }
             }
             Some(MatchNode { node_id, pos }) => {
+                let node_id = node_id + 1;
                 let regex_graph = &self.graphs[graph_id];
-                let node = &regex_graph.nodes[node_id + 1];
+                let node = &regex_graph.nodes[node_id];
 
-                if current_node_id <= *node_id {
+                if current_node_id < node_id {
                     return false;
                 }
 
                 match node.data {
                     NodeData::Start => unreachable!(),
                     NodeData::Literal { .. } => {
-                        if current_node_id == *node_id {
+                        if current_node_id == node_id {
                             pos.matched(current_pos)
-                        }else {
+                        } else {
                             false
                         }
                     }
@@ -226,4 +239,23 @@ impl AeroRegex {
             }
         }
     }
+
+    fn is_end_node(&self, graph_id: usize, node_id: usize) -> bool {
+        let nodes = &self.graphs[graph_id].nodes;
+
+        node_id == nodes.len() - 1
+            || nodes[node_id + 1..].iter().all(|n| {
+                matches!(
+                    n.data,
+                    NodeData::Start
+                        | NodeData::End
+                        | NodeData::Empty
+                        | NodeData::Temp { .. }
+                        | NodeData::TempRang { .. }
+                        | NodeData::TempInf { .. }
+                        | NodeData::Repetition { .. }
+                )
+            })
+    }
 }
+
