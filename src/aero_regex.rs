@@ -198,7 +198,7 @@ impl AeroRegex {
                         });
                         self.is_match(&last_node, graph_id, current_node_id, current_pos, word_len)
                     }
-                    NodeData::TempRang { min_len, max_len } => {
+                    NodeData::TempRange { min_len, max_len } => {
                         let last_node = Some(MatchNode {
                             node_id: node_index,
                             pos: PosIndex::Range(min_len, max_len),
@@ -240,7 +240,7 @@ impl AeroRegex {
                     NodeData::OrLiteral { .. } => todo!(),
                     NodeData::OrGraph { .. } => todo!(),
                     NodeData::Temp { .. } => todo!(),
-                    NodeData::TempRang { .. } => todo!(),
+                    NodeData::TempRange { .. } => todo!(),
                     NodeData::TempInf { .. } => todo!(),
                     NodeData::Empty => todo!(),
                     NodeData::Repetition { .. } => todo!(),
@@ -260,7 +260,7 @@ impl AeroRegex {
                         | NodeData::End
                         | NodeData::Empty
                         | NodeData::Temp { .. }
-                        | NodeData::TempRang { .. }
+                        | NodeData::TempRange { .. }
                         | NodeData::TempInf { .. }
                         | NodeData::Repetition { .. }
                 )
