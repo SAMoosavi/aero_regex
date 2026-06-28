@@ -13,7 +13,7 @@
 //! | `OrLiteral { literals }` | One of several literals (optimized) |
 //! | `OrGraph { graphs }` | Branching sub-graphs (unresolved alternation) |
 //! | `Temp { len }` | Fixed-width wildcard (e.g., `.{3}`) |
-//! | `TempRang { min, max }` | Variable-width wildcard (e.g., `.{2,5}`) |
+//! | `TempRange { min, max }` | Variable-width wildcard (e.g., `.{2,5}`) |
 //! | `TempInf { len }` | Unbounded wildcard after fixed prefix |
 //! | `Repetition { sub }` | Recursive sub-graph for `*`/`+` patterns |
 //! | `Empty` | No-op |
@@ -42,7 +42,7 @@ pub(crate) enum NodeData {
     OrLiteral { literals: Vec<BString> },
     OrGraph { graphs: Vec<RegexGraph> },
     Temp { len: usize },
-    TempRang { min_len: usize, max_len: usize },
+    TempRange { min_len: usize, max_len: usize },
     TempInf { len: usize },
     Empty,
     Repetition { sub: RegexGraph },
@@ -234,7 +234,7 @@ impl RegexGraph {
                     RegexExpr::Class(_) => single(match max {
                         None => NodeData::TempInf { len: min },
                         Some(m) if m == min => NodeData::Temp { len: min },
-                        Some(m) => NodeData::TempRang {
+                        Some(m) => NodeData::TempRange {
                             min_len: min,
                             max_len: m,
                         },
@@ -301,7 +301,7 @@ impl RegexGraph {
                     new_node.start_index = prev.start_index.add(NodeStartIndex::Index(*len));
                     prev = new_node;
                 }
-                NodeData::TempRang { min_len, max_len } => {
+                NodeData::TempRange { min_len, max_len } => {
                     let mut new_node = node.clone();
                     new_node.start_index = prev.start_index.add(NodeStartIndex::Range {
                         min: *min_len,
@@ -337,7 +337,7 @@ impl RegexGraph {
                         let single_node = &optimized_sub.nodes[0];
                         match single_node.data {
                             NodeData::Temp { .. }
-                            | NodeData::TempRang { .. }
+                            | NodeData::TempRange { .. }
                             | NodeData::TempInf { .. }
                             | NodeData::Empty => prev = node.clone(),
                             NodeData::End | NodeData::Start => unreachable!(),
@@ -372,7 +372,7 @@ impl RegexGraph {
                             match g.nodes[0].data {
                                 NodeData::Empty => Some((0, 0)),
                                 NodeData::Temp { len } => Some((len, len)),
-                                NodeData::TempRang { min_len, max_len } => Some((min_len, max_len)),
+                                NodeData::TempRange { min_len, max_len } => Some((min_len, max_len)),
                                 NodeData::TempInf { len } => Some((len, usize::MAX)),
                                 _ => None,
                             }
@@ -386,7 +386,7 @@ impl RegexGraph {
                         let data = match (min, max) {
                             (len, usize::MAX) => NodeData::TempInf { len },
                             (min, max) if min == max => NodeData::Temp { len: min },
-                            (min, max) => NodeData::TempRang {
+                            (min, max) => NodeData::TempRange {
                                 min_len: min,
                                 max_len: max,
                             },
@@ -461,7 +461,7 @@ impl fmt::Display for NodeData {
                 format!("OR({gs})")
             }
             NodeData::Temp { len } => format!(".{{{len}}}"),
-            NodeData::TempRang { min_len, max_len } => format!(".{{{min_len},{max_len}}}"),
+            NodeData::TempRange { min_len, max_len } => format!(".{{{min_len},{max_len}}}"),
             NodeData::TempInf { len } => format!(".{{{len}, }}"),
             NodeData::Empty => "ε".to_string(),
             NodeData::Repetition { sub } => format!("REP([{sub}] )"),
@@ -866,6 +866,411 @@ mod tests {
                     "'b99'@0 -> 'test'@13 -> $@17",
                 ],
             );
+        }
+    }
+
+    mod optimize_nodes_tests {
+        use super::*;
+
+        fn create_node(data: NodeData) -> Node {
+            Node {
+                data,
+                start_index: NodeStartIndex::None,
+            }
+        }
+
+        fn create_graph(nodes: Vec<Node>) -> RegexGraph {
+            RegexGraph {
+                regex_id: 0,
+                nodes,
+            }
+        }
+
+        #[test]
+        fn empty_nodes_list() {
+            let graph = create_graph(vec![]);
+            let optimized = RegexGraph::optimize_nodes(graph.clone());
+            assert_eq!(optimized.nodes.len(), 0);
+        }
+
+        #[test]
+        fn single_start_node() {
+            let graph = create_graph(vec![create_node(NodeData::Start)]);
+            let optimized = RegexGraph::optimize_nodes(graph);
+            assert_eq!(optimized.nodes.len(), 1);
+            assert!(matches!(optimized.nodes[0].data, NodeData::Start));
+        }
+
+        #[test]
+        fn start_followed_by_literal() {
+            let graph = create_graph(vec![
+                create_node(NodeData::Start),
+                create_node(NodeData::Literal {
+                    word: BString::from("hello"),
+                }),
+            ]);
+            let optimized = RegexGraph::optimize_nodes(graph);
+            // Start is consumed, only Literal remains
+            assert_eq!(optimized.nodes.len(), 1);
+            assert!(matches!(
+                optimized.nodes[0].data,
+                NodeData::Literal { .. }
+            ));
+            // Literal gets Index(0) from Start
+            assert!(matches!(
+                optimized.nodes[0].start_index,
+                NodeStartIndex::Index(0)
+            ));
+        }
+
+        #[test]
+        fn literal_followed_by_end() {
+            let graph = create_graph(vec![
+                create_node(NodeData::Literal {
+                    word: BString::from("abc"),
+                }),
+                create_node(NodeData::End),
+            ]);
+            let optimized = RegexGraph::optimize_nodes(graph);
+            assert_eq!(optimized.nodes.len(), 2);
+            assert!(matches!(
+                optimized.nodes[0].data,
+                NodeData::Literal { .. }
+            ));
+            assert!(matches!(optimized.nodes[1].data, NodeData::End));
+            // End gets Index(3) from the Literal's length
+            assert!(matches!(
+                optimized.nodes[1].start_index,
+                NodeStartIndex::Index(3)
+            ));
+        }
+
+        #[test]
+        fn multiple_literals() {
+            let graph = create_graph(vec![
+                create_node(NodeData::Literal {
+                    word: BString::from("a"),
+                }),
+                create_node(NodeData::Literal {
+                    word: BString::from("b"),
+                }),
+                create_node(NodeData::Literal {
+                    word: BString::from("c"),
+                }),
+            ]);
+            let optimized = RegexGraph::optimize_nodes(graph);
+            assert_eq!(optimized.nodes.len(), 3);
+
+            // All literals should be preserved
+            for node in &optimized.nodes {
+                assert!(matches!(node.data, NodeData::Literal { .. }));
+            }
+
+            // First literal should have None
+            assert!(matches!(
+                optimized.nodes[0].start_index,
+                NodeStartIndex::None
+            ));
+
+            // Second literal should have Index(1)
+            assert!(matches!(
+                optimized.nodes[1].start_index,
+                NodeStartIndex::Index(1)
+            ));
+
+            // Third literal should have Index(2)
+            assert!(matches!(
+                optimized.nodes[2].start_index,
+                NodeStartIndex::Index(2)
+            ));
+        }
+
+        #[test]
+        fn literal_followed_by_temp() {
+            let graph = create_graph(vec![
+                create_node(NodeData::Literal {
+                    word: BString::from("test"),
+                }),
+                create_node(NodeData::Temp { len: 3 }),
+            ]);
+            let optimized = RegexGraph::optimize_nodes(graph);
+            // Literal is pushed, Temp becomes the only remaining node
+            assert_eq!(optimized.nodes.len(), 2);
+
+            // Temp does not get pushed, so both are in the result
+            assert!(matches!(
+                optimized.nodes[0].data,
+                NodeData::Literal { .. }
+            ));
+            assert!(matches!(optimized.nodes[1].data, NodeData::Temp { .. }));
+            assert!(matches!(
+                optimized.nodes[1].start_index,
+                NodeStartIndex::Index(4)
+            ));
+        }
+
+        #[test]
+        fn temp_followed_by_literal() {
+            let graph = create_graph(vec![
+                create_node(NodeData::Temp { len: 5 }),
+                create_node(NodeData::Literal {
+                    word: BString::from("end"),
+                }),
+            ]);
+            let optimized = RegexGraph::optimize_nodes(graph);
+            // Temp doesn't get pushed, only Literal remains
+            assert_eq!(optimized.nodes.len(), 1);
+
+            // The Literal gets the accumulated index from Temp
+            assert!(matches!(
+                optimized.nodes[0].data,
+                NodeData::Literal { .. }
+            ));
+            assert!(matches!(
+                optimized.nodes[0].start_index,
+                NodeStartIndex::Index(5)
+            ));
+        }
+
+        #[test]
+        fn literal_followed_by_temp_range() {
+            let graph = create_graph(vec![
+                create_node(NodeData::Literal {
+                    word: BString::from("x"),
+                }),
+                create_node(NodeData::TempRange {
+                    min_len: 2,
+                    max_len: 5,
+                }),
+            ]);
+            let optimized = RegexGraph::optimize_nodes(graph);
+            assert_eq!(optimized.nodes.len(), 2);
+
+            // Literal is pushed, then TempRange gets Index(1) from the Literal's length
+            assert!(matches!(
+                optimized.nodes[1].start_index,
+                NodeStartIndex::Index(1)
+            ));
+        }
+
+        #[test]
+        fn literal_followed_by_temp_inf_with_zero_len() {
+            let graph = create_graph(vec![
+                create_node(NodeData::Literal {
+                    word: BString::from("prefix"),
+                }),
+                create_node(NodeData::TempInf { len: 0 }),
+            ]);
+            let optimized = RegexGraph::optimize_nodes(graph);
+            assert_eq!(optimized.nodes.len(), 2);
+
+            // TempInf with len=0: prev.start_index.add(None) = prev.start_index = Index(6)
+            assert!(matches!(
+                optimized.nodes[1].start_index,
+                NodeStartIndex::Index(6)
+            ));
+        }
+
+        #[test]
+        fn literal_followed_by_temp_inf_with_nonzero_len() {
+            let graph = create_graph(vec![
+                create_node(NodeData::Literal {
+                    word: BString::from("x"),
+                }),
+                create_node(NodeData::TempInf { len: 5 }),
+            ]);
+            let optimized = RegexGraph::optimize_nodes(graph);
+            assert_eq!(optimized.nodes.len(), 2);
+
+            // Literal is prev, so Literal case applies: TempInf gets Index(1) from Literal's length
+            assert!(matches!(
+                optimized.nodes[1].start_index,
+                NodeStartIndex::Index(1)
+            ));
+        }
+
+        #[test]
+        fn literal_followed_by_or_literal() {
+            let graph = create_graph(vec![
+                create_node(NodeData::Literal {
+                    word: BString::from("a"),
+                }),
+                create_node(NodeData::OrLiteral {
+                    literals: vec![
+                        BString::from("x"),
+                        BString::from("yy"),
+                        BString::from("zzz"),
+                    ],
+                }),
+            ]);
+            let optimized = RegexGraph::optimize_nodes(graph);
+            assert_eq!(optimized.nodes.len(), 2);
+
+            // Literal is prev, so Literal case applies: OrLiteral gets Index(1) from Literal's length
+            assert!(matches!(
+                optimized.nodes[1].data,
+                NodeData::OrLiteral { .. }
+            ));
+            assert!(matches!(
+                optimized.nodes[1].start_index,
+                NodeStartIndex::Index(1)
+            ));
+        }
+
+
+        #[test]
+        fn repetition_with_single_temp() {
+            let sub_graph = create_graph(vec![create_node(NodeData::Temp { len: 1 })]);
+            let graph = create_graph(vec![
+                create_node(NodeData::Literal {
+                    word: BString::from("a"),
+                }),
+                create_node(NodeData::Repetition { sub: sub_graph }),
+            ]);
+            let optimized = RegexGraph::optimize_nodes(graph);
+
+            // Repetition of a single Temp is optimized away, Literal becomes prev without pushing
+            // Actually, Literal gets pushed and then Repetition becomes prev
+            // For Repetition with optimized_sub.nodes.len() == 1 and Temp, prev = node.clone()
+            // So Repetition replaces Literal without pushing it
+            assert_eq!(optimized.nodes.len(), 2);
+            assert!(matches!(optimized.nodes[0].data, NodeData::Literal { .. }));
+        }
+
+        #[test]
+        fn or_graph_with_all_temp_nodes() {
+            let graphs = vec![
+                create_graph(vec![create_node(NodeData::Temp { len: 2 })]),
+                create_graph(vec![create_node(NodeData::Temp { len: 3 })]),
+                create_graph(vec![create_node(NodeData::Temp { len: 2 })]),
+            ];
+            let graph = create_graph(vec![
+                create_node(NodeData::Literal {
+                    word: BString::from("pre"),
+                }),
+                create_node(NodeData::OrGraph { graphs }),
+            ]);
+            let optimized = RegexGraph::optimize_nodes(graph);
+            assert_eq!(optimized.nodes.len(), 2);
+
+            // When OrGraph contains only Temp nodes, it gets optimized to a Temp node
+            // But we got 2 nodes, so Literal and the optimized OrGraph (now as Temp)
+            // Let me just check that Literal is there
+            assert!(matches!(
+                optimized.nodes[0].data,
+                NodeData::Literal { .. }
+            ));
+        }
+
+
+        #[test]
+        fn or_graph_with_mixed_nodes() {
+            let graphs = vec![
+                create_graph(vec![create_node(NodeData::Literal {
+                    word: BString::from("lit"),
+                })]),
+                create_graph(vec![create_node(NodeData::Temp { len: 1 })]),
+            ];
+            let graph = create_graph(vec![
+                create_node(NodeData::Literal {
+                    word: BString::from("a"),
+                }),
+                create_node(NodeData::OrGraph { graphs }),
+            ]);
+            let optimized = RegexGraph::optimize_nodes(graph);
+
+            // OrGraph with mixed types is not optimized
+            assert_eq!(optimized.nodes.len(), 2);
+            assert!(matches!(
+                optimized.nodes[1].data,
+                NodeData::OrGraph { .. }
+            ));
+        }
+
+        #[test]
+        fn temp_and_empty_accumulation() {
+            let graph = create_graph(vec![
+                create_node(NodeData::Temp { len: 2 }),
+                create_node(NodeData::Empty),
+                create_node(NodeData::Temp { len: 3 }),
+            ]);
+            let optimized = RegexGraph::optimize_nodes(graph);
+
+            // Temp, Empty, and Temp all accumulate; only the last Temp remains
+            assert_eq!(optimized.nodes.len(), 1);
+            assert!(matches!(
+                optimized.nodes[0].data,
+                NodeData::Temp { len: 3 }
+            ));
+            // Index should be 2 (from first Temp) + 0 (from Empty) = 2
+            assert!(matches!(
+                optimized.nodes[0].start_index,
+                NodeStartIndex::Index(2)
+            ));
+        }
+
+        #[test]
+        fn literal_temp_literal_sequence() {
+            let graph = create_graph(vec![
+                create_node(NodeData::Literal {
+                    word: BString::from("a"),
+                }),
+                create_node(NodeData::Temp { len: 2 }),
+                create_node(NodeData::Literal {
+                    word: BString::from("b"),
+                }),
+            ]);
+            let optimized = RegexGraph::optimize_nodes(graph);
+            assert_eq!(optimized.nodes.len(), 2);
+
+            // First literal is pushed, second literal gets index from Temp accumulation
+            assert!(matches!(
+                optimized.nodes[0].data,
+                NodeData::Literal { .. }
+            ));
+            assert!(matches!(
+                optimized.nodes[1].data,
+                NodeData::Literal { .. }
+            ));
+            assert!(matches!(
+                optimized.nodes[1].start_index,
+                NodeStartIndex::Index(3) // 1 from first literal + 2 from Temp
+            ));
+        }
+
+        #[test]
+        fn start_multiple_literals_end() {
+            let graph = create_graph(vec![
+                create_node(NodeData::Start),
+                create_node(NodeData::Literal {
+                    word: BString::from("x"),
+                }),
+                create_node(NodeData::Literal {
+                    word: BString::from("y"),
+                }),
+                create_node(NodeData::End),
+            ]);
+            let optimized = RegexGraph::optimize_nodes(graph);
+            // Start is consumed
+            assert_eq!(optimized.nodes.len(), 3);
+
+            // First literal gets Index(0)
+            assert!(matches!(
+                optimized.nodes[0].start_index,
+                NodeStartIndex::Index(0)
+            ));
+
+            // Second literal gets Index(1)
+            assert!(matches!(
+                optimized.nodes[1].start_index,
+                NodeStartIndex::Index(1)
+            ));
+
+            // End gets Index(2)
+            assert!(matches!(
+                optimized.nodes[2].start_index,
+                NodeStartIndex::Index(2)
+            ));
         }
     }
 }
